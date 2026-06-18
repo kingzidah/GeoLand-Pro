@@ -4,6 +4,24 @@ import { ApiError } from '../utils/ApiError';
 import { logger } from '../config/logger';
 import type { ListUsersQuery, ChangeRoleInput, ListAuditLogsQuery } from '../validations/admin.schema';
 
+// ─── Injectable DB interface ───────────────────────────────────────────────────
+// Narrow subset of PrismaClient operations used by the five scoped admin methods.
+// Follows the ImpersonationRedisClient pattern so tests can pass a fake without
+// a real database. Production code uses the global `prisma` singleton by default.
+export interface AdminDb {
+  user: {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    findFirst(args: any): Promise<any>;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    update(args: any): Promise<any>;
+  };
+  auditLog: {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    findMany(args: any): Promise<any[]>;
+    count(args: any): Promise<number>;
+  };
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 const adminUserSelect = {
@@ -59,9 +77,13 @@ export const adminService = {
     };
   },
 
-  async getUserById(targetId: string) {
-    const user = await prisma.user.findUnique({
-      where: { id: targetId },
+  async getUserById(targetId: string, callerOrganisationId: string | null, db: AdminDb = prisma) {
+    const user = await db.user.findFirst({
+      where: {
+        id: targetId,
+        // Platform admins (callerOrganisationId === null) may read across all orgs.
+        ...(callerOrganisationId !== null && { organisationId: callerOrganisationId }),
+      },
       select: {
         id: true,
         email: true,
@@ -84,13 +106,16 @@ export const adminService = {
     return user;
   },
 
-  async suspendUser(requesterId: string, targetId: string) {
+  async suspendUser(requesterId: string, targetId: string, callerOrganisationId: string | null, db: AdminDb = prisma) {
     if (requesterId === targetId) {
       throw ApiError.badRequest('You cannot suspend your own account');
     }
 
-    const target = await prisma.user.findUnique({
-      where: { id: targetId },
+    const target = await db.user.findFirst({
+      where: {
+        id: targetId,
+        ...(callerOrganisationId !== null && { organisationId: callerOrganisationId }),
+      },
       select: { role: true, isActive: true },
     });
     if (!target) throw ApiError.notFound('User');
@@ -100,7 +125,7 @@ export const adminService = {
     if (!target.isActive) throw ApiError.badRequest('User is already suspended');
 
     // Clear refresh token to immediately invalidate their active session
-    await prisma.user.update({
+    await db.user.update({
       where: { id: targetId },
       data: { isActive: false, refreshTokenHash: null },
     });
@@ -108,25 +133,31 @@ export const adminService = {
     logger.info('User suspended', { targetId, suspendedBy: requesterId });
   },
 
-  async activateUser(requesterId: string, targetId: string) {
-    const target = await prisma.user.findUnique({
-      where: { id: targetId },
+  async activateUser(requesterId: string, targetId: string, callerOrganisationId: string | null, db: AdminDb = prisma) {
+    const target = await db.user.findFirst({
+      where: {
+        id: targetId,
+        ...(callerOrganisationId !== null && { organisationId: callerOrganisationId }),
+      },
       select: { isActive: true },
     });
     if (!target) throw ApiError.notFound('User');
     if (target.isActive) throw ApiError.badRequest('User is already active');
 
-    await prisma.user.update({ where: { id: targetId }, data: { isActive: true } });
+    await db.user.update({ where: { id: targetId }, data: { isActive: true } });
     logger.info('User activated', { targetId, activatedBy: requesterId });
   },
 
-  async changeRole(requesterId: string, targetId: string, data: ChangeRoleInput) {
+  async changeRole(requesterId: string, targetId: string, data: ChangeRoleInput, callerOrganisationId: string | null, db: AdminDb = prisma) {
     if (requesterId === targetId) {
       throw ApiError.badRequest('You cannot change your own role');
     }
 
-    const target = await prisma.user.findUnique({
-      where: { id: targetId },
+    const target = await db.user.findFirst({
+      where: {
+        id: targetId,
+        ...(callerOrganisationId !== null && { organisationId: callerOrganisationId }),
+      },
       select: { role: true },
     });
     if (!target) throw ApiError.notFound('User');
@@ -138,7 +169,7 @@ export const adminService = {
     }
 
     // Role is embedded in JWT — revoke session so next request forces re-login with new role
-    await prisma.user.update({
+    await db.user.update({
       where: { id: targetId },
       data: { role: data.role, refreshTokenHash: null },
     });
@@ -151,10 +182,13 @@ export const adminService = {
     });
   },
 
-  async listAuditLogs(query: ListAuditLogsQuery) {
+  async listAuditLogs(query: ListAuditLogsQuery, callerOrganisationId: string | null, db: AdminDb = prisma) {
     const skip = (query.page - 1) * query.limit;
 
     const where: Prisma.AuditLogWhereInput = {
+      // Scope to the calling admin's org via the user relation (userId is non-nullable on AuditLog).
+      // Platform admins (callerOrganisationId === null) see logs from all orgs.
+      ...(callerOrganisationId !== null && { user: { organisationId: callerOrganisationId } }),
       ...(query.userId && { userId: query.userId }),
       ...(query.entityType && { entityType: query.entityType }),
       ...(query.entityId && { entityId: query.entityId }),
@@ -167,7 +201,7 @@ export const adminService = {
     };
 
     const [logs, total] = await Promise.all([
-      prisma.auditLog.findMany({
+      db.auditLog.findMany({
         where,
         select: {
           id: true,
@@ -185,7 +219,7 @@ export const adminService = {
         take: query.limit,
         orderBy: { createdAt: 'desc' },
       }),
-      prisma.auditLog.count({ where }),
+      db.auditLog.count({ where }),
     ]);
 
     return {

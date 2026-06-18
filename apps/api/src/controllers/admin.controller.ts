@@ -12,30 +12,38 @@ export const adminController = {
   }),
 
   getUser: asyncHandler(async (req: Request, res: Response) => {
-    const user = await adminService.getUserById(req.params.id);
+    const { organisationId, isPlatformAdmin } = (req as AuthenticatedRequest).user;
+    // Platform admins may read across orgs; org-level SUPER_ADMINs are scoped to their own org.
+    const orgFilter = isPlatformAdmin ? null : organisationId;
+    const user = await adminService.getUserById(req.params.id, orgFilter);
     res.status(200).json({ success: true, data: user });
   }),
 
   suspendUser: asyncHandler(async (req: Request, res: Response) => {
-    const { id: requesterId } = (req as AuthenticatedRequest).user;
-    await adminService.suspendUser(requesterId, req.params.id);
+    const { id: requesterId, organisationId, isPlatformAdmin } = (req as AuthenticatedRequest).user;
+    const orgFilter = isPlatformAdmin ? null : organisationId;
+    await adminService.suspendUser(requesterId, req.params.id, orgFilter);
     res.status(200).json({ success: true, message: 'User suspended and session revoked' });
   }),
 
   activateUser: asyncHandler(async (req: Request, res: Response) => {
-    const { id: requesterId } = (req as AuthenticatedRequest).user;
-    await adminService.activateUser(requesterId, req.params.id);
+    const { id: requesterId, organisationId, isPlatformAdmin } = (req as AuthenticatedRequest).user;
+    const orgFilter = isPlatformAdmin ? null : organisationId;
+    await adminService.activateUser(requesterId, req.params.id, orgFilter);
     res.status(200).json({ success: true, message: 'User activated' });
   }),
 
   changeRole: asyncHandler(async (req: Request, res: Response) => {
-    const { id: requesterId } = (req as AuthenticatedRequest).user;
-    await adminService.changeRole(requesterId, req.params.id, req.body as ChangeRoleInput);
+    const { id: requesterId, organisationId, isPlatformAdmin } = (req as AuthenticatedRequest).user;
+    const orgFilter = isPlatformAdmin ? null : organisationId;
+    await adminService.changeRole(requesterId, req.params.id, req.body as ChangeRoleInput, orgFilter);
     res.status(200).json({ success: true, message: 'Role updated and session revoked' });
   }),
 
   listAuditLogs: asyncHandler(async (req: Request, res: Response) => {
-    const result = await adminService.listAuditLogs(req.query as unknown as ListAuditLogsQuery);
+    const { organisationId, isPlatformAdmin } = (req as AuthenticatedRequest).user;
+    const orgFilter = isPlatformAdmin ? null : organisationId;
+    const result = await adminService.listAuditLogs(req.query as unknown as ListAuditLogsQuery, orgFilter);
     res.status(200).json({ success: true, ...result });
   }),
 
