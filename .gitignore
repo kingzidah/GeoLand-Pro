@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.env
+.env.local
+.env.production
+*.log
+logs/
+.DS_Store
+Thumbs.db
+coverage/
+.nyc_output/
+.turbo/
+.gstack/
+
+.claude/settings.local.json
+.claude/*.local.json

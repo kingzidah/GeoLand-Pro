@@ -1,0 +1,138 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install API dependencies
+        run: npm ci
+        working-directory: apps/api
+
+      - name: Build API (typecheck)
+        run: npm run build
+        working-directory: apps/api
+
+      - name: Install web dependencies
+        run: npm ci
+        working-directory: apps/web
+
+      - name: Build web
+        run: npm run build
+        working-directory: apps/web
+
+      - name: Install tenant-portal dependencies
+        run: npm ci
+        working-directory: apps/tenant-portal
+
+      - name: Build tenant-portal
+        run: npm run build
+        working-directory: apps/tenant-portal
+
+      - name: Install master-control dependencies
+        run: npm ci
+        working-directory: apps/master-control
+
+      - name: Build master-control
+        run: npm run build
+        working-directory: apps/master-control
+
+  security-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install API dependencies
+        run: npm ci
+        working-directory: apps/api
+
+      - name: Audit API dependencies
+        run: npm audit --audit-level=critical
+        working-directory: apps/api
+
+      - name: Install web dependencies
+        run: npm ci
+        working-directory: apps/web
+
+      - name: Audit web dependencies
+        run: npm audit --audit-level=critical
+        working-directory: apps/web
+
+      - name: Install tenant-portal dependencies
+        run: npm ci
+        working-directory: apps/tenant-portal
+
+      - name: Audit tenant-portal dependencies
+        run: npm audit --audit-level=critical
+        working-directory: apps/tenant-portal
+
+      - name: Install master-control dependencies
+        run: npm ci
+        working-directory: apps/master-control
+
+      - name: Audit master-control dependencies
+        run: npm audit --audit-level=critical
+        working-directory: apps/master-control
+
+  deploy-api:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [lint-and-typecheck, security-audit]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy API to Railway
+        run: railway up --service api
+        working-directory: apps/api
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+
+  deploy-web:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [lint-and-typecheck]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install web dependencies
+        run: npm ci
+        working-directory: apps/web
+
+      - name: Build web
+        run: npm run build
+        working-directory: apps/web
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy web to Railway
+        run: railway up --service web
+        working-directory: apps/web
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}

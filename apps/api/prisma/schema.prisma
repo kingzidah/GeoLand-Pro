@@ -1,0 +1,618 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  directUrl  = env("DIRECT_URL")
+  extensions = [postgis]
+}
+
+// ─── ENUMS ────────────────────────────────────────────────────────────────────
+
+enum Role {
+  SUPER_ADMIN // Platform owner — sees all properties + commissions
+  ADMIN // Landowner — full access to their property
+  MANAGER // Property manager — no financial settings
+  FIELD_SURVEYOR // Mobile app only — draw boundaries, capture photos
+  TENANT // Self-service portal — own lease + documents only
+}
+
+// Master Control (Layer 1 — platform staff) roles. Null for non-platform-admin users.
+enum PlatformRole {
+  TECHNICAL_DIRECTOR
+  MANAGING_DIRECTOR
+  FINANCE_CONTROLLER
+  OPERATIONS_LEAD
+  BOARD_OBSERVER
+}
+
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+enum PlotStatus {
+  VACANT
+  OCCUPIED
+  DISPUTED
+  RESERVED
+  UNDER_SURVEY
+}
+
+enum LeaseStatus {
+  PENDING_SIGNATURE
+  ACTIVE
+  EXPIRED
+  TERMINATED
+}
+
+enum TransactionType {
+  RENT_PAYMENT
+  ARREARS_PAYMENT
+  DEPOSIT
+  REFUND
+}
+
+enum TransactionStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REVERSED
+}
+
+enum DocumentType {
+  BOUNDARY_CERTIFICATE
+  TENANCY_AGREEMENT
+  RENT_RECEIPT
+  ARREARS_NOTICE
+  PLOT_CERTIFICATE
+  LC_SUBMISSION_PACKAGE
+  ANNUAL_REPORT
+}
+
+enum NotificationChannel {
+  SMS
+  WHATSAPP
+  EMAIL
+}
+
+enum NotificationStatus {
+  QUEUED
+  SENT
+  DELIVERED
+  FAILED
+}
+
+enum AlertEventType {
+  BOUNDARY_CROSSED
+  BOUNDARY_EXITED
+  SATELLITE_CHANGE
+}
+
+// Master Control — consent-gated scoped impersonation (see OrgAccessRequest)
+enum AccessRequestStatus {
+  PENDING // staff submitted, awaiting client SUPER_ADMIN decision
+  APPROVED // client approved; staff may "enter" until expiresAt
+  DENIED // client denied
+  ACTIVE // staff has entered; session live until expiry/revoke/exit
+  EXPIRED // expiresAt passed without entry, or an ACTIVE session timed out
+  REVOKED // client SUPER_ADMIN killed an ACTIVE session early
+  ENDED // staff exited an ACTIVE session normally
+}
+
+// ─── MODELS ───────────────────────────────────────────────────────────────────
+
+model Organisation {
+  id               String   @id @default(cuid())
+  name             String
+  slug             String   @unique
+  logoUrl          String?
+  country          String   @default("Ghana")
+  currency         String   @default("GHS")
+  timezone         String   @default("Africa/Accra")
+  isActive         Boolean  @default(true)
+  subscriptionTier String   @default("STANDARD")
+  commissionRate   Float    @default(0.10)
+  maxProperties    Int      @default(10)
+  maxUsers         Int      @default(50)
+  onboardingStage  Int      @default(1) // Master Control onboarding pipeline, stages 1-6
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  users          User[]
+  properties     Property[]
+  inviteCodes    InviteCode[]
+  supportTickets SupportTicket[]
+  accessRequests OrgAccessRequest[]
+
+  @@map("organisations")
+}
+
+model InviteCode {
+  id             String       @id @default(cuid())
+  code           String       @unique @default(cuid())
+  organisationId String
+  organisation   Organisation @relation(fields: [organisationId], references: [id])
+  role           Role
+  createdBy      String
+  usedBy         String?
+  usedAt         DateTime?
+  expiresAt      DateTime
+  isActive       Boolean      @default(true)
+  createdAt      DateTime     @default(now())
+
+  @@index([organisationId])
+  @@map("invite_codes")
+}
+
+model User {
+  id                  String        @id @default(cuid())
+  email               String        @unique
+  phone               String?       @unique
+  passwordHash        String
+  firstName           String
+  lastName            String
+  role                Role
+  isActive            Boolean       @default(true)
+  isEmailVerified     Boolean       @default(false)
+  lastLoginAt         DateTime?
+  refreshTokenHash    String?
+  passwordResetToken  String?
+  passwordResetExpiry DateTime?
+  avatarUrl           String?
+  organisationId      String?
+  isPlatformAdmin     Boolean       @default(false)
+  platformRole        PlatformRole? // Master Control role; null for non-platform-admins
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+
+  organisation      Organisation?  @relation(fields: [organisationId], references: [id])
+  tenantProfile     TenantProfile?
+  createdPlots      Plot[]         @relation("PlotCreatedBy")
+  createdDocuments  Document[]     @relation("DocumentCreatedBy")
+  managedProperties Property[]     @relation("PropertyManagers")
+  auditLogs         AuditLog[]
+  notifications     Notification[]
+  surveyPoints      SurveyPoint[]  @relation("SurveyPointCreatedBy")
+  surveyImports     SurveyImport[] @relation("SurveyImportCreatedBy")
+
+  @@index([organisationId])
+  @@map("users")
+}
+
+model Property {
+  id              String   @id @default(cuid())
+  name            String
+  description     String?
+  address         String
+  region          String // e.g. "Greater Accra Region"
+  district        String
+  totalAreaSqm    Float
+  totalAreaHa     Float? // Outer property boundary area, set via PATCH /properties/:id/boundary
+  boundaryGeoJSON Json? // Cached for fast frontend reads — outer property boundary (not individual plots)
+  // PostGIS geometry column added via raw migration (see prisma/migrations/add_postgis_columns.sql)
+  isActive        Boolean  @default(true)
+  organisationId  String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  organisation      Organisation       @relation(fields: [organisationId], references: [id])
+  managers          User[]             @relation("PropertyManagers")
+  plots             Plot[]
+  geofenceAlerts    GeofenceAlert[]
+  satelliteImages   SatelliteImage[]
+  vaultSubscription VaultSubscription?
+  surveyPoints      SurveyPoint[]
+  surveyImports     SurveyImport[]
+
+  @@index([organisationId])
+  @@map("properties")
+}
+
+// GPS points captured live (e.g. from a mobile app walking a plot boundary).
+// A set of points sharing a sessionId is later "closed" into a Plot.
+model SurveyPoint {
+  id          String   @id @default(cuid())
+  propertyId  String
+  property    Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  sessionId   String
+  pointIndex  Int
+  latitude    Float
+  longitude   Float
+  elevation   Float?
+  accuracy    Float?
+  capturedAt  DateTime
+  label       String?
+  notes       String?
+  closed      Boolean  @default(false)
+  createdById String
+  createdBy   User     @relation("SurveyPointCreatedBy", fields: [createdById], references: [id])
+  createdAt   DateTime @default(now())
+
+  @@index([propertyId, sessionId])
+  @@map("survey_points")
+}
+
+// Audit trail of survey imports (file upload, manual entry, or closed GPS session)
+model SurveyImport {
+  id           String   @id @default(cuid())
+  propertyId   String
+  property     Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  importedById String
+  importedBy   User     @relation("SurveyImportCreatedBy", fields: [importedById], references: [id])
+  format       String // GEOJSON | CSV | MANUAL | GPS_SESSION
+  plotsCreated Int
+  plotIds      String[]
+  createdAt    DateTime @default(now())
+
+  @@index([propertyId])
+  @@map("survey_imports")
+}
+
+model Plot {
+  id              String     @id @default(cuid())
+  plotNumber      String // Human-readable unique ID: "PLT-001"
+  propertyId      String
+  status          PlotStatus @default(VACANT)
+  areaSqm         Float
+  centroidLat     Float?
+  centroidLng     Float?
+  boundaryGeoJSON Json // Stored for fast frontend reads
+  // PostGIS geometry column added via raw migration
+  description     String?
+  createdById     String
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  property        Property         @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  createdBy       User             @relation("PlotCreatedBy", fields: [createdById], references: [id])
+  leaseAgreements LeaseAgreement[]
+  documents       Document[]
+  geotaggedPhotos GeotaggedPhoto[]
+  geofenceAlerts  GeofenceAlert[]
+
+  @@unique([propertyId, plotNumber])
+  @@index([propertyId])
+  @@index([status])
+  @@map("plots")
+}
+
+model TenantProfile {
+  id               String    @id @default(cuid())
+  userId           String    @unique
+  nationalIdType   String // "Ghana Card" | "Passport" | "Voter ID"
+  nationalIdNumber String    @unique
+  dateOfBirth      DateTime?
+  occupation       String?
+  // { name: string, phone: string, relationship: string }
+  emergencyContact Json?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  leaseAgreements LeaseAgreement[]
+
+  @@map("tenant_profiles")
+}
+
+model LeaseAgreement {
+  id               String      @id @default(cuid())
+  leaseNumber      String      @unique // "LEASE-2024-0001"
+  plotId           String
+  tenantProfileId  String
+  status           LeaseStatus @default(PENDING_SIGNATURE)
+  startDate        DateTime
+  endDate          DateTime
+  monthlyRentGHS   Float
+  depositAmountGHS Float       @default(0)
+
+  // Immutable GPS snapshot embedded at signing time
+  plotCentroidLat     Float
+  plotCentroidLng     Float
+  plotBoundaryGeoJSON Json
+
+  // Digital signatures stored in S3
+  tenantSignatureUrl String?
+  adminSignatureUrl  String?
+  signedAt           DateTime?
+
+  // Arrears — recomputed nightly by the arrears scheduler job
+  totalPaidGHS    Float     @default(0)
+  arrearsGHS      Float     @default(0)
+  lastPaymentDate DateTime?
+
+  notes             String?
+  terminatedAt      DateTime?
+  terminationReason String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  plot          Plot           @relation(fields: [plotId], references: [id])
+  tenant        TenantProfile  @relation(fields: [tenantProfileId], references: [id])
+  rentRecords   RentRecord[]
+  documents     Document[]
+  notifications Notification[]
+
+  @@index([plotId])
+  @@index([tenantProfileId])
+  @@index([status])
+  @@map("lease_agreements")
+}
+
+model RentRecord {
+  id            String    @id @default(cuid())
+  leaseId       String
+  periodYear    Int // e.g. 2024
+  periodMonth   Int // 1–12
+  dueDate       DateTime
+  amountDueGHS  Float
+  amountPaidGHS Float     @default(0)
+  paidAt        DateTime?
+  isPaid        Boolean   @default(false)
+  isArrears     Boolean   @default(false) // Flagged true when overdue by scheduler
+  notes         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  lease       LeaseAgreement @relation(fields: [leaseId], references: [id], onDelete: Cascade)
+  transaction Transaction?
+
+  @@unique([leaseId, periodYear, periodMonth])
+  @@index([leaseId])
+  @@index([isPaid])
+  @@map("rent_records")
+}
+
+model Transaction {
+  id               String            @id @default(cuid())
+  rentRecordId     String?           @unique
+  leaseId          String?
+  type             TransactionType
+  status           TransactionStatus @default(PENDING)
+  amountGHS        Float
+  paymentMethod    String? // "Mobile Money" | "Bank Transfer" | "Cash"
+  paymentReference String? // External reference (MoMo transaction ID)
+  paidAt           DateTime?
+  notes            String?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  rentRecord RentRecord? @relation(fields: [rentRecordId], references: [id])
+  commission Commission?
+
+  @@index([leaseId])
+  @@map("transactions")
+}
+
+model Commission {
+  id            String    @id @default(cuid())
+  transactionId String    @unique
+  ratePercent   Float     @default(4.0)
+  amountGHS     Float // transactionAmount × ratePercent / 100
+  isPaid        Boolean   @default(false)
+  paidAt        DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  transaction Transaction @relation(fields: [transactionId], references: [id])
+
+  @@map("commissions")
+}
+
+model Document {
+  id          String       @id @default(cuid())
+  type        DocumentType
+  title       String
+  s3Key       String       @unique
+  s3Url       String
+  mimeType    String       @default("application/pdf")
+  sizeBytes   Int?
+  plotId      String?
+  leaseId     String?
+  createdById String
+  createdAt   DateTime     @default(now())
+
+  plot      Plot?           @relation(fields: [plotId], references: [id], onDelete: SetNull)
+  lease     LeaseAgreement? @relation(fields: [leaseId], references: [id], onDelete: SetNull)
+  createdBy User            @relation("DocumentCreatedBy", fields: [createdById], references: [id])
+
+  @@index([plotId])
+  @@index([leaseId])
+  @@map("documents")
+}
+
+model GeofenceAlert {
+  id                String   @id @default(cuid())
+  plotId            String
+  propertyId        String
+  name              String
+  bufferMetres      Float    @default(0) // Expands alert zone beyond the plot edge
+  boundaryGeoJSON   Json
+  // PostGIS geometry column added via raw migration
+  isActive          Boolean  @default(true)
+  notifyPhones      String[] // Recipients for SMS/WhatsApp alerts
+  notifyViaWhatsApp Boolean  @default(true)
+  notifyViaSMS      Boolean  @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  plot     Plot         @relation(fields: [plotId], references: [id], onDelete: Cascade)
+  property Property     @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  events   AlertEvent[]
+
+  @@map("geofence_alerts")
+}
+
+model AlertEvent {
+  id           String         @id @default(cuid())
+  alertId      String
+  eventType    AlertEventType
+  triggeredLat Float
+  triggeredLng Float
+  triggeredAt  DateTime       @default(now())
+  deviceId     String?
+  notified     Boolean        @default(false)
+
+  alert GeofenceAlert @relation(fields: [alertId], references: [id], onDelete: Cascade)
+
+  @@index([alertId])
+  @@map("alert_events")
+}
+
+model GeotaggedPhoto {
+  id         String   @id @default(cuid())
+  plotId     String
+  s3Key      String   @unique
+  s3Url      String
+  lat        Float
+  lng        Float
+  altitude   Float?
+  accuracyM  Float? // GPS accuracy in metres
+  takenAt    DateTime
+  caption    String?
+  uploadedAt DateTime @default(now())
+
+  plot Plot @relation(fields: [plotId], references: [id], onDelete: Cascade)
+
+  @@index([plotId])
+  @@map("geotagged_photos")
+}
+
+model Notification {
+  id            String              @id @default(cuid())
+  userId        String?
+  leaseId       String?
+  channel       NotificationChannel
+  status        NotificationStatus  @default(QUEUED)
+  recipient     String // Phone number or email address
+  subject       String?
+  body          String
+  externalId    String? // Twilio message SID
+  sentAt        DateTime?
+  failureReason String?
+  retryCount    Int                 @default(0)
+  createdAt     DateTime            @default(now())
+
+  user  User?           @relation(fields: [userId], references: [id], onDelete: SetNull)
+  lease LeaseAgreement? @relation(fields: [leaseId], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([userId])
+  @@map("notifications")
+}
+
+model SatelliteImage {
+  id           String   @id @default(cuid())
+  propertyId   String
+  property     Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  capturedAt   DateTime
+  provider     String // "sentinel2" | "planet" | "airbus" | "maxar"
+  tier         Int // 1-4
+  resolution   Float // metres per pixel
+  imageUrl     String? // S3 URL when available
+  thumbnailUrl String?
+  cloudCover   Float? // percentage 0-100
+  ndvi         Float? // vegetation index
+  changeScore  Float? // 0-1, how much changed vs previous
+  status       String   @default("pending") // pending|processing|ready|failed
+  centerLat    Float? // Map center for rendering this capture
+  centerLng    Float?
+  metadata     Json?
+  createdAt    DateTime @default(now())
+
+  @@index([propertyId, capturedAt])
+  @@map("satellite_images")
+}
+
+model VaultSubscription {
+  id                    String    @id @default(cuid())
+  propertyId            String    @unique
+  property              Property  @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  active                Boolean   @default(true)
+  digitalBackup         Boolean   @default(true)
+  physicalVault         Boolean   @default(false)
+  lastPackGenerated     DateTime?
+  lastDeliveryConfirmed DateTime?
+  deliveryAddress       String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@map("vault_subscriptions")
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  userId     String
+  action     String // e.g. "PLOT_CREATED" | "LEASE_SIGNED" | "PAYMENT_RECORDED"
+  entityType String // e.g. "Plot" | "LeaseAgreement" | "Transaction"
+  entityId   String
+  metadata   Json? // Additional context snapshot
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([entityType, entityId])
+  @@index([userId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// Master Control — platform-wide key/value settings (e.g. maintenance mode, default commission rate).
+model PlatformSetting {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     String
+  updatedAt DateTime @updatedAt
+  updatedBy String // userId of the platform admin who last changed this setting
+
+  @@map("platform_settings")
+}
+
+// Master Control — Module 6 Support Centre. Minimal model; thread/attachment support deferred.
+model SupportTicket {
+  id             String       @id @default(cuid())
+  organisationId String
+  subject        String
+  body           String
+  status         TicketStatus @default(OPEN)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  organisation Organisation @relation(fields: [organisationId], references: [id])
+
+  @@index([organisationId])
+  @@index([status])
+  @@map("support_tickets")
+}
+
+// Master Control — consent-gated scoped impersonation. A staff member requests
+// read-only access to an org; the org's SUPER_ADMIN approves with per-section
+// scopes + a duration, then staff "enter" a scoped, time-boxed session.
+model OrgAccessRequest {
+  id              String              @id @default(cuid())
+  organisationId  String
+  requestedById   String // platform-staff userId who requested access
+  reason          String?
+  requestedScopes String[] // AccessScope values requested by staff
+  grantedScopes   String[]            @default([]) // AccessScope values approved by the client SUPER_ADMIN
+  status          AccessRequestStatus @default(PENDING)
+  approvedById    String? // client SUPER_ADMIN userId who approved/denied/revoked
+  expiresAt       DateTime? // set on approval; session ends when now > expiresAt
+  createdAt       DateTime            @default(now())
+  approvedAt      DateTime?
+  endedAt         DateTime?
+
+  organisation Organisation @relation(fields: [organisationId], references: [id])
+
+  @@index([organisationId])
+  @@index([requestedById])
+  @@index([status])
+  @@map("org_access_requests")
+}

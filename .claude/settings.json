@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Set-Location c:\\\\Users\\\\tayoa\\\\geolandpro; Get-ChildItem -Recurse -Force | Select-Object -ExpandProperty FullName | ForEach-Object {$_.Replace\\('c:\\\\Users\\\\tayoa\\\\geolandpro\\\\', ''\\)} | Sort-Object)",
+      "Bash(npx tsc *)",
+      "Bash(node -e ' *)",
+      "PowerShell(Get-Command psql -ErrorAction SilentlyContinue)",
+      "PowerShell(Get-Command pg_ctl -ErrorAction SilentlyContinue)",
+      "Bash(node -e \"console.log\\(require\\('crypto'\\).randomBytes\\(64\\).toString\\('hex'\\)\\)\")",
+      "Bash(node -e \"console.log\\(encodeURIComponent\\('eafäoiöhjestoihwjerjitouh'\\)\\)\")"
+    ]
+  }
+}

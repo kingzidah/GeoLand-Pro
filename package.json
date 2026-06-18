@@ -1,0 +1,25 @@
+{
+  "name": "geolandpro",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build:rbac": "npm --workspace=packages/rbac run build",
+    "postinstall": "npm run build:rbac",
+    "test:rbac": "npm --workspace=packages/rbac run test",
+    "dev:api": "npm --workspace=apps/api run dev",
+    "dev:web": "npm --workspace=apps/web run dev",
+    "dev:tenant-portal": "npm --workspace=apps/tenant-portal run dev",
+    "dev:master-control": "npm --workspace=apps/master-control run dev",
+    "build:api": "npm run build:rbac && npm --workspace=apps/api run build",
+    "build:web": "npm run build:rbac && npm --workspace=apps/web run build",
+    "build:tenant-portal": "npm run build:rbac && npm --workspace=apps/tenant-portal run build",
+    "build:master-control": "npm run build:rbac && npm --workspace=apps/master-control run build"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
