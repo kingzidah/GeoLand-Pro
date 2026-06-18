@@ -186,7 +186,7 @@ export const authService = {
     }
 
     if (!user.isPlatformAdmin && (await platformSettingsService.isMaintenanceModeEnabled())) {
-      throw ApiError.serviceUnavailable('GeoLand Pro is undergoing scheduled maintenance — please try again shortly');
+      throw ApiError.serviceUnavailable(`${brand.name} is undergoing scheduled maintenance — please try again shortly`);
     }
 
     await redis.del(failedLoginKey(data.email)).catch(() => undefined);

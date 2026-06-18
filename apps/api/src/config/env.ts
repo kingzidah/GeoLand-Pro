@@ -53,6 +53,13 @@ const envSchema = z.object({
   OPENROUTER_API_KEY: z.string().min(1, 'OPENROUTER_API_KEY is required'),
   OPENROUTER_MODEL: z.string().default('anthropic/claude-sonnet-4-5'),
 
+  // ─── Email (Resend) ───────────────────────────────────────────────────────
+  // Optional in development — when absent, email delivery falls back to the
+  // NoOp provider which logs the payload. Required in production (enforced by
+  // env.validation.ts). EMAIL_FROM format: "Display Name <addr@domain.com>".
+  RESEND_API_KEY: z.string().optional(),
+  EMAIL_FROM: z.string().optional(),
+
   // ─── Satellite (Google Earth Engine) ─────────────────────────────────────
   // Optional — when absent, the satellite fetch job logs "pending API key"
   // and skips actual imagery requests until this is configured.

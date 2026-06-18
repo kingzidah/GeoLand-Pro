@@ -2,7 +2,9 @@ import { Role, NotificationChannel, NotificationStatus, Prisma } from '@prisma/c
 import { prisma } from '../config/database';
 import { twilioClient } from '../config/twilio';
 import { env } from '../config/env';
+import { brand } from '../config/brand.config';
 import { logger } from '../config/logger';
+import { notificationQueue } from '../queues/queue.clients';
 import type { ListNotificationsQuery } from '../validations/alert.schema';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -140,7 +142,7 @@ export const notificationService = {
 
     const { alert } = event;
     const body =
-      `GeoLand Pro Alert: "${alert.name}" triggered!\n` +
+      `${brand.name} Alert: "${alert.name}" triggered!\n` +
       `Plot ${alert.plot.plotNumber} — ${alert.property.name}\n` +
       `Location: ${event.triggeredLat.toFixed(6)}, ${event.triggeredLng.toFixed(6)}\n` +
       `Time: ${event.triggeredAt.toLocaleString('en-GB', { timeZone: 'Africa/Accra' })}` +
@@ -196,16 +198,11 @@ export const notificationService = {
     const body =
       `Dear ${lease.tenant.user.firstName}, your rent of GHS ${nextRecord.amountDueGHS.toFixed(2)} ` +
       `for lease ${lease.leaseNumber} is due on ${dueDate}. ` +
-      `Please pay on time to avoid arrears. — GeoLand Pro`;
+      `Please pay on time to avoid arrears. — ${brand.name}`;
 
     await this.send({ to: lease.tenant.user.phone, body, channel: NotificationChannel.SMS, leaseId });
   },
 
-  /**
-   * Records an email notification for later delivery. No SMTP/email provider
-   * is configured yet — this creates a QUEUED Notification record so the
-   * email is ready to send the moment a provider is wired up.
-   */
   async queueEmail(opts: QueueEmailOptions): Promise<string> {
     const record = await prisma.notification.create({
       data: {
@@ -220,7 +217,15 @@ export const notificationService = {
       select: { id: true },
     });
 
-    logger.info('Email queued — no SMTP provider configured, awaiting delivery', {
+    await notificationQueue.add({
+      type: 'EMAIL',
+      notificationId: record.id,
+      to: opts.to,
+      subject: opts.subject,
+      text: opts.body,
+    });
+
+    logger.info('Email queued for delivery', {
       notificationId: record.id,
       to: opts.to,
       subject: opts.subject,
