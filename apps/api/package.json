@@ -7,7 +7,7 @@
     "dev": "nodemon --watch src --watch server.ts --ext ts --exec ts-node server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
-    "test": "node --require ./src/test/setupTestEnv.js --require ts-node/register --test src/middleware/authenticate.test.ts src/middleware/tenant.middleware.test.ts src/validations/organisation.schema.test.ts src/validations/accessRequest.schema.test.ts src/services/impersonationSession.service.test.ts src/services/admin.service.test.ts",
+    "test": "node --require ./src/test/setupTestEnv.js --require ts-node/register --test src/middleware/authenticate.test.ts src/middleware/tenant.middleware.test.ts src/validations/organisation.schema.test.ts src/validations/accessRequest.schema.test.ts src/services/impersonationSession.service.test.ts src/services/admin.service.test.ts src/queues/notification.queue.email.test.ts",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",

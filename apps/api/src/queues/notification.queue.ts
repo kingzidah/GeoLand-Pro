@@ -1,37 +1,20 @@
-import Bull from 'bull';
 import { prisma } from '../config/database';
 import { notificationService } from '../services/notification.service';
-import { createBullClient } from '../config/redis';
 import { logger } from '../config/logger';
+import { getEmailProvider } from '../email';
+import { processEmailJob } from './notification.queue.email.handler';
+import { notificationQueue, arrearsQueue } from './queue.clients';
 
-// ─── Job types ────────────────────────────────────────────────────────────────
-
-export interface AlertNotificationJob {
-  type: 'ALERT';
-  alertId: string;
-  eventId: string;
-}
-
-export interface RentReminderJob {
-  type: 'RENT_REMINDER';
-  leaseId: string;
-}
-
-export type NotificationJobData = AlertNotificationJob | RentReminderJob;
-
-// ─── Queues ───────────────────────────────────────────────────────────────────
-
-export const notificationQueue = new Bull<NotificationJobData>('notifications', {
-  createClient: createBullClient,
-  defaultJobOptions: {
-    attempts: 3,
-    backoff: { type: 'exponential', delay: 5_000 },
-    removeOnComplete: true,
-    removeOnFail: false,
-  },
-});
-
-export const arrearsQueue = new Bull('arrears', { createClient: createBullClient });
+// Re-export everything external modules (alert.service, routes/index) import from here.
+export { notificationQueue, arrearsQueue };
+export type {
+  NotificationJobData,
+  AlertNotificationJob,
+  RentReminderJob,
+  EmailNotificationJob,
+} from './queue.clients';
+export type { NotificationDb } from './notification.queue.email.handler';
+export { processEmailJob };
 
 // ─── Notification processor ───────────────────────────────────────────────────
 
@@ -45,13 +28,16 @@ notificationQueue.process(async (job) => {
     case 'RENT_REMINDER':
       await notificationService.sendRentReminder(data.leaseId);
       break;
+    case 'EMAIL':
+      await processEmailJob(data, getEmailProvider(), prisma);
+      break;
   }
 });
 
 notificationQueue.on('failed', (job, err) => {
   logger.error('Notification job failed', {
     jobId: job.id,
-    type: (job.data as NotificationJobData).type,
+    type: job.data.type,
     attempt: job.attemptsMade,
     error: err.message,
   });
@@ -69,7 +55,6 @@ arrearsQueue.process(async () => {
 
   if (count === 0) return;
 
-  // Recalculate arrearsGHS on every affected lease
   const overdueRecords = await prisma.rentRecord.findMany({
     where: { isArrears: true, isPaid: false },
     select: { leaseId: true, amountDueGHS: true, amountPaidGHS: true },
