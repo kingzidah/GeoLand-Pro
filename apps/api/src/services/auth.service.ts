@@ -4,9 +4,11 @@ import crypto from 'crypto';
 import { Role } from '@prisma/client';
 import { prisma } from '../config/database';
 import { env } from '../config/env';
+import { brand } from '../config/brand.config';
 import { logger } from '../config/logger';
 import { redis } from '../config/redis';
 import { ApiError } from '../utils/ApiError';
+import { notificationService } from './notification.service';
 import { platformSettingsService } from './platformSettings.service';
 import type { ImpersonationClaim } from '../middleware/impersonation';
 import type {
@@ -345,10 +347,28 @@ export const authService = {
       },
     });
 
-    // TODO: Enqueue email via notification job queue
-    // await notificationQueue.add('send-password-reset', { userId: user.id, token: resetToken });
+    // Queue a password-reset email. notificationService.queueEmail creates a
+    // QUEUED Notification record immediately; actual delivery happens once an
+    // SMTP provider is wired up (see notification.service.ts:queueEmail).
+    // The reset link is valid for 1 hour (resetTokenExpiry set above).
+    await notificationService.queueEmail({
+      to: user.email,
+      subject: `[${brand.shortName}] Reset your password`,
+      body: [
+        `Hi ${user.firstName},`,
+        '',
+        'You requested a password reset for your account. Click the link below — it expires in 1 hour:',
+        '',
+        `${env.WEB_APP_URL}/reset-password?token=${resetToken}`,
+        '',
+        'If you did not request this, you can safely ignore this email.',
+        '',
+        `— ${brand.name}`,
+      ].join('\n'),
+      userId: user.id,
+    });
 
-    logger.info('Password reset token issued', { userId: user.id });
+    logger.info('Password reset token issued and email queued', { userId: user.id });
   },
 
   async resetPassword(data: ResetPasswordInput) {
