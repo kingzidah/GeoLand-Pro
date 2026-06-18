@@ -17,6 +17,16 @@ const envSchema = z.object({
   JWT_ACCESS_EXPIRES_IN: z.string().default('15m'),
   JWT_REFRESH_EXPIRES_IN: z.string().default('7d'),
 
+  // ─── Encryption ──────────────────────────────────────────────────────────
+  // 32-byte AES-256 key encoded as 64 hex characters. Validated here so any
+  // environment (dev, staging, production) fails at startup with a clear
+  // message instead of at the first encryption call with a cryptic error.
+  // Generate: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+  ENCRYPTION_KEY: z.string().regex(
+    /^[0-9a-f]{64}$/i,
+    'ENCRYPTION_KEY must be a 64-character hex string (32 bytes)'
+  ),
+
   // ─── AWS S3 ───────────────────────────────────────────────────────────────
   AWS_REGION: z.string(),
   AWS_ACCESS_KEY_ID: z.string(),

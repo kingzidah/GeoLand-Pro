@@ -49,7 +49,13 @@ function generateOtp(): string {
 }
 
 function hashOtp(otp: string, id: string): string {
-  const salt = process.env.OTP_SALT ?? 'otp-default-salt';
+  const salt = process.env.OTP_SALT;
+  if (!salt) {
+    throw new Error(
+      'OTP_SALT must be set in environment. ' +
+      'Generate one: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"'
+    );
+  }
   return crypto.createHmac('sha256', salt).update(`${id}:${otp}`).digest('hex');
 }
 

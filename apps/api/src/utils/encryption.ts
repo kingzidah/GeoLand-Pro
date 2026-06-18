@@ -106,7 +106,13 @@ export function decryptSafe(value: string | null | undefined): string | null {
 // without storing it in plaintext
 // ─────────────────────────────────────────────
 export function hashField(value: string): string {
-  const salt = process.env.HASH_SALT ?? 'default-salt-change-this';
+  const salt = process.env.HASH_SALT;
+  if (!salt) {
+    throw new Error(
+      'HASH_SALT must be set in environment. ' +
+      'Generate one: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"'
+    );
+  }
   return crypto
     .createHmac('sha256', salt)
     .update(value.toLowerCase().trim())

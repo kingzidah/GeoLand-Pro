@@ -10,6 +10,11 @@ const dummyValues = {
   REDIS_URL: 'redis://localhost:6379',
   JWT_ACCESS_SECRET: 'test-jwt-access-secret-xxxxxxxxxxxxxxxxxxxx',
   JWT_REFRESH_SECRET: 'test-jwt-refresh-secret-xxxxxxxxxxxxxxxxxxx',
+  // 64-char hex = 32-byte key — satisfies the ENCRYPTION_KEY Zod regex
+  ENCRYPTION_KEY: 'a'.repeat(64),
+  // Arbitrary 32-byte hex salts — never used for real I/O in unit tests
+  HASH_SALT: 'b'.repeat(64),
+  OTP_SALT:  'c'.repeat(64),
   AWS_REGION: 'us-east-1',
   AWS_ACCESS_KEY_ID: 'test',
   AWS_SECRET_ACCESS_KEY: 'test',
