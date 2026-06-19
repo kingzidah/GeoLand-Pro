@@ -97,7 +97,14 @@ function fitMapToPlots(map: MapLibreMap, plots: MapPlot[], animate = true) {
 const API_BASE = (import.meta.env.VITE_API_URL as string | undefined) || '/api/v1';
 
 function buildPlotsUrl(pid: string | undefined): string {
-  const base = `${API_BASE}/plots/tiles/{z}/{x}/{y}.pbf`;
+  // MapLibre normalises tile URL templates through the URL constructor, which
+  // percent-encodes curly braces in relative paths ({z} → %7Bz%7D), breaking
+  // placeholder substitution and silencing all tile requests. Always use an
+  // absolute URL so the braces survive normalisation unchanged.
+  const absBase = API_BASE.startsWith('http')
+    ? API_BASE
+    : `${window.location.origin}${API_BASE}`;
+  const base = `${absBase}/plots/tiles/{z}/{x}/{y}.pbf`;
   return pid ? `${base}?propertyId=${encodeURIComponent(pid)}` : base;
 }
 
