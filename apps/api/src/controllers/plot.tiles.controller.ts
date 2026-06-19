@@ -63,7 +63,7 @@ export const plotTilesController = {
           SELECT
             p.id,
             p."plotNumber" AS plot_code,
-            p.status,
+            p.status::text AS status,
             p."areaSqm" AS area_sqm,
             p."propertyId" AS property_id,
             ST_AsMVTGeom(
