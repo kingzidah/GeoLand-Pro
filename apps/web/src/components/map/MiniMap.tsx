@@ -11,11 +11,13 @@ interface Props {
 function toFeatureCollection(plots: MapPlot[]): GeoJSON.FeatureCollection {
   return {
     type: 'FeatureCollection',
-    features: plots.map((plot) => ({
-      type: 'Feature',
-      geometry: plot.boundaryGeoJSON as GeoJSON.Geometry,
-      properties: { id: plot.id },
-    })),
+    features: plots
+      .filter((plot) => plot.boundaryGeoJSON != null)
+      .map((plot) => ({
+        type: 'Feature',
+        geometry: plot.boundaryGeoJSON as GeoJSON.Geometry,
+        properties: { id: plot.id },
+      })),
   };
 }
 
@@ -48,11 +50,22 @@ export function MiniMap({ plots, mainMap }: Props) {
     if (!containerRef.current || mapRef.current || plots.length === 0) return;
 
     const fc = toFeatureCollection(plots);
-    const [minX, minY, maxX, maxY] = bbox(fc);
+    if (fc.features.length === 0) return;
+
+    let bboxCoords: [number, number, number, number];
+    try {
+      bboxCoords = bbox(fc) as [number, number, number, number];
+    } catch { return; }
+
+    const [minX, minY, maxX, maxY] = bboxCoords;
 
     const map = new maplibregl.Map({
       container: containerRef.current,
-      style: { version: 8, sources: {}, layers: [], glyphs: undefined },
+      style: {
+        version: 8,
+        sources: {},
+        layers: [{ id: 'background', type: 'background', paint: { 'background-color': '#1e293b' } }],
+      },
       center: [(minX + maxX) / 2, (minY + maxY) / 2],
       zoom: 13,
       interactive: false,

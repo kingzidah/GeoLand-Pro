@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, forwardRef, useImperativeHandle } from 're
 import { Link } from 'react-router-dom';
 import maplibregl, { Map as MapLibreMap, Popup } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
-import { area as turfArea, centroid as turfCentroid, distance as turfDistance, polygon as turfPolygon } from '@turf/turf';
+import { area as turfArea, bbox as turfBbox, centroid as turfCentroid, distance as turfDistance, polygon as turfPolygon } from '@turf/turf';
 import { useMutation } from '@tanstack/react-query';
 import { cn } from '@/utils/cn';
 import { propertiesApi } from '@/api/properties';
@@ -58,6 +58,41 @@ const TERRARIUM_TILE_URL = 'https://s3.amazonaws.com/elevation-tiles-prod/terrar
 const CARTO_DARK_STYLE = 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
 
 const GHANA_FALLBACK_CENTER: [number, number] = [-1.0232, 7.9465];
+
+// ─── Bounds helpers ───────────────────────────────────────────────────────────
+
+/** Compute [minLng, minLat, maxLng, maxLat] from plot boundary polygons.
+ *  Falls back to centroid points when a plot has no boundary geometry. */
+function computePlotsBbox(plots: MapPlot[]): [number, number, number, number] | null {
+  const features: GeoJSON.Feature[] = [];
+  for (const p of plots) {
+    if (p.boundaryGeoJSON != null) {
+      features.push({ type: 'Feature', geometry: p.boundaryGeoJSON as GeoJSON.Geometry, properties: {} });
+    } else if (p.centroidLng != null && p.centroidLat != null) {
+      features.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [p.centroidLng, p.centroidLat] }, properties: {} });
+    }
+  }
+  if (features.length === 0) return null;
+  try {
+    return turfBbox({ type: 'FeatureCollection', features }) as [number, number, number, number];
+  } catch { return null; }
+}
+
+/** Fit the map to all plots, preserving pitch & bearing. Falls back to Ghana default view. */
+function fitMapToPlots(map: MapLibreMap, plots: MapPlot[], animate = true) {
+  const bb = computePlotsBbox(plots);
+  if (bb) {
+    map.fitBounds([[bb[0], bb[1]], [bb[2], bb[3]]], {
+      padding: 80,
+      pitch: 60,
+      bearing: -20,
+      ...(animate ? { duration: 1000 } : { animate: false }),
+    });
+  } else {
+    // No real data — park camera at Ghana center; real data will always win above.
+    map.flyTo({ center: GHANA_FALLBACK_CENTER, zoom: 10, pitch: 60, bearing: -20, essential: true });
+  }
+}
 
 const API_BASE = (import.meta.env.VITE_API_URL as string | undefined) || '/api/v1';
 
@@ -341,27 +376,13 @@ export const Plot3DMap = forwardRef<Plot3DMapHandle, Props>(function Plot3DMap(
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
 
-    const boundaryCentroid = (() => {
-      if (!propertyBoundary) return null;
-      try {
-        return turfCentroid({ type: 'Feature', properties: {}, geometry: propertyBoundary })
-          .geometry.coordinates as [number, number];
-      } catch { return null; }
-    })();
-
-    const initialCenter: [number, number] =
-      center ??
-      boundaryCentroid ??
-      (plots[0]?.centroidLng != null && plots[0]?.centroidLat != null
-        ? [plots[0].centroidLng, plots[0].centroidLat]
-        : GHANA_FALLBACK_CENTER);
-
     const map = new maplibregl.Map({
       container: containerRef.current,
       // CARTO Dark Matter — free vector basemap, no API key required.
       style: CARTO_DARK_STYLE,
-      center: initialCenter,
-      zoom: 16,
+      // Temporary center — overridden by fitMapToPlots() in map.on('load').
+      center: GHANA_FALLBACK_CENTER,
+      zoom: 5,
       pitch: 60,
       bearing: -20,
       maxPitch: 85,
@@ -752,6 +773,11 @@ export const Plot3DMap = forwardRef<Plot3DMapHandle, Props>(function Plot3DMap(
         }
       });
 
+      // Fit to actual plot data immediately (no animation on initial load).
+      // plotsRef.current is populated before mount because Plot3DMap only renders
+      // after PropertyMapPage's isLoading gate clears.
+      fitMapToPlots(map, plotsRef.current, false);
+
       setMapInstance(map);
     });
 
@@ -846,22 +872,19 @@ export const Plot3DMap = forwardRef<Plot3DMapHandle, Props>(function Plot3DMap(
     else map.once('load', apply);
   }, [layers.satellite, layers.sentinel2, layers.boundaries, layers.labels, layers.alertZones]);
 
-  // Recenter on property switch
+  // Refit bounds when property changes (for pages that keep Plot3DMap mounted across property switches).
   const didMountRef = useRef(false);
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
     if (!didMountRef.current) { didMountRef.current = true; return; }
 
-    let target: [number, number] | null = center ?? null;
-    if (!target && propertyBoundary) {
-      try {
-        target = turfCentroid({ type: 'Feature', properties: {}, geometry: propertyBoundary }).geometry.coordinates as [number, number];
-      } catch { target = null; }
-    }
-    if (!target) target = GHANA_FALLBACK_CENTER;
-    map.flyTo({ center: target, zoom: 16, pitch: 60, bearing: -20, essential: true });
     (map.getSource('plots') as maplibregl.VectorTileSource | undefined)?.setTiles([tileUrlRef.current]);
+    if (map.isStyleLoaded()) {
+      fitMapToPlots(map, plotsRef.current);
+    } else {
+      map.once('load', () => fitMapToPlots(map, plotsRef.current));
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [propertyId]);
 
