@@ -386,6 +386,9 @@ export const Plot3DMap = forwardRef<Plot3DMapHandle, Props>(function Plot3DMap(
       pitch: 60,
       bearing: -20,
       maxPitch: 85,
+      // Cap zoom to 18: above this, CARTO tiles and AWS terrain DEM have no more
+      // data, causing a grey "map data not yet available" placeholder sheet.
+      maxZoom: 18,
       transformRequest: (url, resourceType) => {
         if (resourceType === 'Tile' && url.includes('/plots/tiles/')) {
           const token = getAccessToken();
@@ -404,6 +407,12 @@ export const Plot3DMap = forwardRef<Plot3DMapHandle, Props>(function Plot3DMap(
       // basemap labels remain on top of everything except our own plot labels.
       const baseLayers = map.getStyle().layers ?? [];
       const firstSymbolId = baseLayers.find((l) => l.type === 'symbol')?.id;
+
+      // Hide CARTO's own building-footprint extrusion layers. Without this,
+      // CARTO's grey building volumes visually bury our coloured plot extrusions.
+      for (const layerId of ['building', 'building-top', 'building-outline']) {
+        if (map.getLayer(layerId)) map.setLayoutProperty(layerId, 'visibility', 'none');
+      }
 
       // ── Terrain (always-on, no API key required) ──────────────────────────
       map.addSource('terrain', {

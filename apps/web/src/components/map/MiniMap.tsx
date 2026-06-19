@@ -45,9 +45,18 @@ export function MiniMap({ plots, mainMap }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
 
-  // Initialise the minimap once we have plots to fit bounds to
+  // Stable key derived from sorted plot IDs — changes when property switches
+  const plotKey = [...plots].map(p => p.id).sort().join(',');
+
+  // Initialise (or re-initialise) the minimap whenever the plot set changes
   useEffect(() => {
-    if (!containerRef.current || mapRef.current || plots.length === 0) return;
+    if (!containerRef.current || plots.length === 0) return;
+
+    // Clean up any previous minimap instance before re-creating
+    if (mapRef.current) {
+      mapRef.current.remove();
+      mapRef.current = null;
+    }
 
     const fc = toFeatureCollection(plots);
     if (fc.features.length === 0) return;
@@ -95,12 +104,13 @@ export function MiniMap({ plots, mainMap }: Props) {
         paint: { 'line-color': '#ef4444', 'line-width': 2 },
       });
 
+      // Cap maxZoom so the minimap stays context-level even for tiny plot sets.
       map.fitBounds(
         [
           [minX, minY],
           [maxX, maxY],
         ],
-        { padding: 12, animate: false }
+        { padding: 20, animate: false, maxZoom: 14 }
       );
     });
 
@@ -110,7 +120,7 @@ export function MiniMap({ plots, mainMap }: Props) {
       mapRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [plots.length > 0]);
+  }, [plotKey]);
 
   // Sync the viewport rectangle with the main map's current view
   useEffect(() => {
