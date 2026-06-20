@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, forwardRef, useImperativeHandle } from 're
 import { Link } from 'react-router-dom';
 import maplibregl, { Map as MapLibreMap, Popup } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
-import { area as turfArea, centroid as turfCentroid, distance as turfDistance, polygon as turfPolygon } from '@turf/turf';
+import { area as turfArea, bbox as turfBbox, centroid as turfCentroid, distance as turfDistance, polygon as turfPolygon } from '@turf/turf';
 import { useMutation } from '@tanstack/react-query';
 import { cn } from '@/utils/cn';
 import { propertiesApi } from '@/api/properties';
@@ -15,48 +15,109 @@ import { DrawPlotForm } from './DrawPlotForm';
 import { MiniMap } from './MiniMap';
 import type { StatusFilter } from './PlotFilterChips';
 
-const STATUS_COLORS: Record<string, string> = {
-  VACANT: '#10b981',
-  OCCUPIED: '#3b82f6',
-  DISPUTED: '#ef4444',
-  RESERVED: '#f59e0b',
+// ─── Colour palette ───────────────────────────────────────────────────────────
+// Extrusion fill colours (darker, so vertical-gradient reads well)
+const EXTRUSION_COLORS: Record<string, string> = {
+  VACANT:       '#475569',
+  OCCUPIED:     '#0369a1',
+  DISPUTED:     '#b91c1c',
+  RESERVED:     '#92400e',
+  UNDER_SURVEY: '#9a3412',
+};
+
+// Glow halo colours (brighter for the neon effect)
+const GLOW_COLORS: Record<string, string> = {
+  VACANT:       '#94a3b8',
+  OCCUPIED:     '#38bdf8',
+  DISPUTED:     '#f87171',
+  RESERVED:     '#fbbf24',
+  UNDER_SURVEY: '#fb923c',
+};
+
+// 2D fill colours (for when 3D mode is off)
+const FILL_COLORS: Record<string, string> = {
+  VACANT:       '#10b981',
+  OCCUPIED:     '#3b82f6',
+  DISPUTED:     '#ef4444',
+  RESERVED:     '#f59e0b',
   UNDER_SURVEY: '#f97316',
 };
 
 const VACANT_HIGHLIGHT_COLOR = '#fde047';
-const GHANA_PLOT_SQM = 929; // ~100ft x 100ft "standard plot" commonly used in Ghana
+const GHANA_PLOT_SQM = 929;
 
-// Sentinel-2 cloudless yearly composite — free XYZ tiles, no API key required.
+// ─── Tile sources ─────────────────────────────────────────────────────────────
+// Sentinel-2 cloudless yearly composite — free, no API key required.
 const SENTINEL2_TILE_URL =
   'https://s2maps.eu/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=s2cloudless-2023&STYLE=default&TILEMATRIXSET=PopularWebMercator&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}';
 
-// Geographic center of Ghana — used as a last-resort fallback when a property
-// has neither plots nor a surveyed boundary yet.
+// AWS Open Data Terrain Tiles — terrarium encoding, public domain, no key required.
+const TERRARIUM_TILE_URL = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png';
+
+// CARTO Dark Matter — free vector basemap, no API key required.
+const CARTO_DARK_STYLE = 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
+
 const GHANA_FALLBACK_CENTER: [number, number] = [-1.0232, 7.9465];
 
-const MAPTILER_KEY = import.meta.env.VITE_MAPTILER_KEY as string | undefined;
+// ─── Bounds helpers ───────────────────────────────────────────────────────────
+
+/** Compute [minLng, minLat, maxLng, maxLat] from plot boundary polygons.
+ *  Falls back to centroid points when a plot has no boundary geometry. */
+function computePlotsBbox(plots: MapPlot[]): [number, number, number, number] | null {
+  const features: GeoJSON.Feature[] = [];
+  for (const p of plots) {
+    if (p.boundaryGeoJSON != null) {
+      features.push({ type: 'Feature', geometry: p.boundaryGeoJSON as GeoJSON.Geometry, properties: {} });
+    } else if (p.centroidLng != null && p.centroidLat != null) {
+      features.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [p.centroidLng, p.centroidLat] }, properties: {} });
+    }
+  }
+  if (features.length === 0) return null;
+  try {
+    return turfBbox({ type: 'FeatureCollection', features }) as [number, number, number, number];
+  } catch { return null; }
+}
+
+/** Fit the map to all plots, preserving pitch & bearing. Falls back to Ghana default view. */
+function fitMapToPlots(map: MapLibreMap, plots: MapPlot[], animate = true) {
+  const bb = computePlotsBbox(plots);
+  if (bb) {
+    map.fitBounds([[bb[0], bb[1]], [bb[2], bb[3]]], {
+      padding: 80,
+      pitch: 60,
+      bearing: -20,
+      ...(animate ? { duration: 1000 } : { animate: false }),
+    });
+  } else {
+    // No real data — park camera at Ghana center; real data will always win above.
+    map.flyTo({ center: GHANA_FALLBACK_CENTER, zoom: 10, pitch: 60, bearing: -20, essential: true });
+  }
+}
 
 const API_BASE = (import.meta.env.VITE_API_URL as string | undefined) || '/api/v1';
 
 function buildPlotsUrl(pid: string | undefined): string {
-  const base = `${API_BASE}/plots/tiles/{z}/{x}/{y}.pbf`;
+  // MapLibre normalises tile URL templates through the URL constructor, which
+  // percent-encodes curly braces in relative paths ({z} → %7Bz%7D), breaking
+  // placeholder substitution and silencing all tile requests. Always use an
+  // absolute URL so the braces survive normalisation unchanged.
+  const absBase = API_BASE.startsWith('http')
+    ? API_BASE
+    : `${window.location.origin}${API_BASE}`;
+  const base = `${absBase}/plots/tiles/{z}/{x}/{y}.pbf`;
   return pid ? `${base}?propertyId=${encodeURIComponent(pid)}` : base;
 }
 
 interface Props {
   plots: MapPlot[];
   propertyId?: string;
-  center?: [number, number]; // [lng, lat]
-  /** Outer property survey boundary — drawn as a thick white dashed line */
+  center?: [number, number];
   propertyBoundary?: GeoJSON.Geometry | null;
   className?: string;
-  /** Plot ID to highlight in vivid color; all others are dimmed ("locked" look) */
   highlightPlotId?: string;
   statusFilter?: StatusFilter;
-  /** Plot IDs that have active GeofenceAlerts — rendered as pulsing red zones when the layer is on */
   alertPlotIds?: string[];
   onPlotsChanged?: () => void;
-  /** Overrides for the initial Layers panel state (merged with DEFAULT_LAYERS) */
   initialLayers?: Partial<LayersState>;
 }
 
@@ -64,29 +125,33 @@ export interface Plot3DMapHandle {
   flyToPlot: (plotId: string) => void;
 }
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
 function emptyFC(): GeoJSON.FeatureCollection {
   return { type: 'FeatureCollection', features: [] };
 }
 
-function propertyBoundaryFeatureCollection(boundary: GeoJSON.Geometry | null | undefined): GeoJSON.FeatureCollection {
+function propertyBoundaryFC(boundary: GeoJSON.Geometry | null | undefined): GeoJSON.FeatureCollection {
   if (!boundary) return emptyFC();
   return { type: 'FeatureCollection', features: [{ type: 'Feature', properties: {}, geometry: boundary }] };
 }
 
+function statusColorExpr(colorMap: Record<string, string>, fallback: string) {
+  return [
+    'match', ['get', 'status'],
+    'VACANT',       colorMap.VACANT,
+    'OCCUPIED',     colorMap.OCCUPIED,
+    'DISPUTED',     colorMap.DISPUTED,
+    'RESERVED',     colorMap.RESERVED,
+    'UNDER_SURVEY', colorMap.UNDER_SURVEY,
+    fallback,
+  ] as unknown as maplibregl.ExpressionSpecification;
+}
 
 function plotFillColorExpr(vacantHighlight: boolean) {
-  const statusMatch = [
-    'match',
-    ['get', 'status'],
-    'VACANT', STATUS_COLORS.VACANT,
-    'OCCUPIED', STATUS_COLORS.OCCUPIED,
-    'DISPUTED', STATUS_COLORS.DISPUTED,
-    'RESERVED', STATUS_COLORS.RESERVED,
-    'UNDER_SURVEY', STATUS_COLORS.UNDER_SURVEY,
-    '#94a3b8',
-  ];
-  if (!vacantHighlight) return statusMatch as unknown as maplibregl.ExpressionSpecification;
-  return ['case', ['==', ['get', 'status'], 'VACANT'], VACANT_HIGHLIGHT_COLOR, statusMatch] as unknown as maplibregl.ExpressionSpecification;
+  const base = statusColorExpr(FILL_COLORS, '#94a3b8');
+  if (!vacantHighlight) return base;
+  return ['case', ['==', ['get', 'status'], 'VACANT'], VACANT_HIGHLIGHT_COLOR, base] as unknown as maplibregl.ExpressionSpecification;
 }
 
 function plotFillOpacityExpr(highlightPlotId: string | undefined, statusFilter: StatusFilter | undefined) {
@@ -96,7 +161,17 @@ function plotFillOpacityExpr(highlightPlotId: string | undefined, statusFilter: 
   if (highlightPlotId) {
     return ['case', ['==', ['get', 'id'], highlightPlotId], 0.75, 0.12] as unknown as maplibregl.ExpressionSpecification;
   }
-  return 0.35;
+  return 0.45;
+}
+
+function extrusionOpacityExpr(highlightPlotId: string | undefined, statusFilter: StatusFilter | undefined) {
+  if (statusFilter && statusFilter !== 'ALL') {
+    return ['case', ['==', ['get', 'status'], statusFilter], 0.9, 0.08] as unknown as maplibregl.ExpressionSpecification;
+  }
+  if (highlightPlotId) {
+    return ['case', ['==', ['get', 'id'], highlightPlotId], 0.95, 0.3] as unknown as maplibregl.ExpressionSpecification;
+  }
+  return 0.85;
 }
 
 function plotCentroid(plot: MapPlot): [number, number] | null {
@@ -109,7 +184,7 @@ function plotCentroid(plot: MapPlot): [number, number] | null {
   }
 }
 
-function alertZonesFeatureCollection(plots: MapPlot[], alertPlotIds: string[]): GeoJSON.FeatureCollection {
+function alertZonesFC(plots: MapPlot[], alertPlotIds: string[]): GeoJSON.FeatureCollection {
   const idSet = new Set(alertPlotIds);
   const features: GeoJSON.Feature[] = [];
   for (const plot of plots) {
@@ -137,11 +212,7 @@ function nextPlotNumber(plots: MapPlot[]): string {
     const match = p.plotNumber.match(/^(.*?)(\d+)\s*$/);
     if (!match) continue;
     const num = parseInt(match[2], 10);
-    if (num > max) {
-      max = num;
-      prefix = match[1];
-      digits = match[2].length;
-    }
+    if (num > max) { max = num; prefix = match[1]; digits = match[2].length; }
   }
   return `${prefix}${String(max + 1).padStart(digits, '0')}`;
 }
@@ -149,7 +220,6 @@ function nextPlotNumber(plots: MapPlot[]): string {
 function buildDrawSourceData(points: [number, number][], cursor?: [number, number]): GeoJSON.FeatureCollection {
   const features: GeoJSON.Feature[] = [];
   const linePoints = cursor ? [...points, cursor] : points;
-
   if (linePoints.length >= 2) {
     features.push({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: linePoints } });
   }
@@ -165,7 +235,6 @@ function buildDrawSourceData(points: [number, number][], cursor?: [number, numbe
 function buildMeasurePreview(points: [number, number][], cursor: [number, number] | undefined, mode: MapMode): GeoJSON.Feature[] {
   const features: GeoJSON.Feature[] = [];
   const linePoints = cursor ? [...points, cursor] : points;
-
   if (mode === 'measure-distance' && linePoints.length >= 2) {
     features.push({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: linePoints.slice(0, 2) } });
   }
@@ -183,6 +252,8 @@ function buildMeasurePreview(points: [number, number][], cursor: [number, number
   return features;
 }
 
+// ─── Component ────────────────────────────────────────────────────────────────
+
 export const Plot3DMap = forwardRef<Plot3DMapHandle, Props>(function Plot3DMap(
   { plots, propertyId, center, propertyBoundary, className, highlightPlotId, statusFilter, alertPlotIds, onPlotsChanged, initialLayers },
   ref
@@ -191,8 +262,6 @@ export const Plot3DMap = forwardRef<Plot3DMapHandle, Props>(function Plot3DMap(
   const mapRef = useRef<MapLibreMap | null>(null);
   const popupRef = useRef<Popup | null>(null);
   const highlightTimeoutRef = useRef<ReturnType<typeof setTimeout>>();
-  // Tracks the current tile URL so token-rotation and property-switch effects
-  // can call src.setTiles([tileUrlRef.current]) without a stale closure.
   const tileUrlRef = useRef<string>(buildPlotsUrl(propertyId));
 
   const modeRef = useRef<MapMode>('view');
@@ -215,26 +284,27 @@ export const Plot3DMap = forwardRef<Plot3DMapHandle, Props>(function Plot3DMap(
   const [liveLabel, setLiveLabel] = useState<string | null>(null);
   const [mapInstance, setMapInstance] = useState<MapLibreMap | null>(null);
 
-  useEffect(() => {
-    modeRef.current = mode;
-  }, [mode]);
+  // 3D / terrain state — mutable refs keep the latest value inside closures
+  const [is3D, setIs3D] = useState(true);
+  const [terrainExaggeration, setTerrainExaggeration] = useState(1.4);
+  const is3DRef = useRef(true);
+  const terrainExaggerationRef = useRef(1.4);
 
-  useEffect(() => {
-    plotsRef.current = plots;
-  }, [plots]);
+  useEffect(() => { modeRef.current = mode; }, [mode]);
+  useEffect(() => { plotsRef.current = plots; }, [plots]);
+  useEffect(() => { tileUrlRef.current = buildPlotsUrl(propertyId); }, [propertyId]);
+  useEffect(() => { is3DRef.current = is3D; }, [is3D]);
+  useEffect(() => { terrainExaggerationRef.current = terrainExaggeration; }, [terrainExaggeration]);
 
-  useEffect(() => {
-    tileUrlRef.current = buildPlotsUrl(propertyId);
-  }, [propertyId]);
+  // ─── Map interaction helpers ──────────────────────────────────────────────
 
   function updateDrawSource(map: MapLibreMap, points: [number, number][], cursor?: [number, number]) {
-    const source = map.getSource('draw') as maplibregl.GeoJSONSource | undefined;
-    source?.setData(buildDrawSourceData(points, cursor));
+    (map.getSource('draw') as maplibregl.GeoJSONSource | undefined)?.setData(buildDrawSourceData(points, cursor));
   }
 
   function refreshMeasureSource(map: MapLibreMap) {
-    const source = map.getSource('measure') as maplibregl.GeoJSONSource | undefined;
-    source?.setData({ type: 'FeatureCollection', features: measureFeaturesRef.current });
+    (map.getSource('measure') as maplibregl.GeoJSONSource | undefined)
+      ?.setData({ type: 'FeatureCollection', features: measureFeaturesRef.current });
   }
 
   function updateMeasurePreview(map: MapLibreMap, cursor?: [number, number]) {
@@ -242,8 +312,7 @@ export const Plot3DMap = forwardRef<Plot3DMapHandle, Props>(function Plot3DMap(
     if (!source) return;
     const m = modeRef.current;
     const points = m === 'measure-distance' ? measureDistPointsRef.current : measureAreaPointsRef.current;
-    const preview = buildMeasurePreview(points, cursor, m);
-    source.setData({ type: 'FeatureCollection', features: [...measureFeaturesRef.current, ...preview] });
+    source.setData({ type: 'FeatureCollection', features: [...measureFeaturesRef.current, ...buildMeasurePreview(points, cursor, m)] });
   }
 
   function finalizeDrawnPlot(map: MapLibreMap) {
@@ -253,12 +322,7 @@ export const Plot3DMap = forwardRef<Plot3DMapHandle, Props>(function Plot3DMap(
     const poly = turfPolygon([ring]);
     const sqm = turfArea(poly);
     const centroidCoords = turfCentroid(poly).geometry.coordinates as [number, number];
-    setPendingPlot({
-      geojson: poly.geometry,
-      areaSqm: sqm,
-      centroid: centroidCoords,
-      plotNumber: nextPlotNumber(plotsRef.current),
-    });
+    setPendingPlot({ geojson: poly.geometry, areaSqm: sqm, centroid: centroidCoords, plotNumber: nextPlotNumber(plotsRef.current) });
     setLiveLabel(null);
     setMode('view');
     void map;
@@ -283,123 +347,55 @@ export const Plot3DMap = forwardRef<Plot3DMapHandle, Props>(function Plot3DMap(
     refreshMeasureSource(map);
   }
 
-  useImperativeHandle(
-    ref,
-    () => ({
-      flyToPlot: (plotId: string) => {
-        const map = mapRef.current;
-        const plot = plotsRef.current.find((p) => p.id === plotId);
-        if (!map || !plot) return;
-        const coords = plotCentroid(plot);
-        if (!coords) return;
+  // ─── flyToPlot imperative handle ─────────────────────────────────────────
 
-        map.flyTo({ center: coords, zoom: 19, pitch: 60, essential: true });
+  useImperativeHandle(ref, () => ({
+    flyToPlot: (plotId: string) => {
+      const map = mapRef.current;
+      const plot = plotsRef.current.find((p) => p.id === plotId);
+      if (!map || !plot) return;
+      const coords = plotCentroid(plot);
+      if (!coords) return;
 
-        const setHighlight = () => {
-          const source = map.getSource('search-highlight') as maplibregl.GeoJSONSource | undefined;
-          source?.setData({
-            type: 'FeatureCollection',
-            features: [{ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: coords } }],
-          });
-        };
-        if (map.isStyleLoaded()) setHighlight();
-        else map.once('load', setHighlight);
+      map.flyTo({ center: coords, zoom: 19, pitch: 60, essential: true });
 
-        if (highlightTimeoutRef.current) clearTimeout(highlightTimeoutRef.current);
-        highlightTimeoutRef.current = setTimeout(() => {
-          const source = map.getSource('search-highlight') as maplibregl.GeoJSONSource | undefined;
-          source?.setData(emptyFC());
-        }, 5000);
+      const setHighlight = () => {
+        (map.getSource('search-highlight') as maplibregl.GeoJSONSource | undefined)?.setData({
+          type: 'FeatureCollection',
+          features: [{ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: coords } }],
+        });
+      };
+      if (map.isStyleLoaded()) setHighlight();
+      else map.once('load', setHighlight);
 
-        setSelectedPlot(plot);
-        setLayersOpen(false);
-      },
-    }),
-    []
-  );
+      if (highlightTimeoutRef.current) clearTimeout(highlightTimeoutRef.current);
+      highlightTimeoutRef.current = setTimeout(() => {
+        (map.getSource('search-highlight') as maplibregl.GeoJSONSource | undefined)?.setData(emptyFC());
+      }, 5000);
+
+      setSelectedPlot(plot);
+      setLayersOpen(false);
+    },
+  }), []);
+
+  // ─── Map initialisation ───────────────────────────────────────────────────
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
 
-    const boundaryCentroid = (() => {
-      if (!propertyBoundary) return null;
-      try {
-        return turfCentroid({ type: 'Feature', properties: {}, geometry: propertyBoundary }).geometry
-          .coordinates as [number, number];
-      } catch {
-        return null;
-      }
-    })();
-
-    const initialCenter: [number, number] =
-      center ??
-      boundaryCentroid ??
-      (plots[0]?.centroidLng != null && plots[0]?.centroidLat != null
-        ? [plots[0].centroidLng, plots[0].centroidLat]
-        : GHANA_FALLBACK_CENTER);
-
     const map = new maplibregl.Map({
       container: containerRef.current,
-      style: {
-        version: 8,
-        glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
-        sources: {
-          satellite: {
-            type: 'raster',
-            tiles: [
-              'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-            ],
-            tileSize: 256,
-            attribution: 'Esri, Maxar, Earthstar Geographics',
-          },
-          sentinel2: {
-            type: 'raster',
-            tiles: [SENTINEL2_TILE_URL],
-            tileSize: 256,
-            attribution: 'Sentinel-2 cloudless — EOX IT Services GmbH',
-          },
-          ...(MAPTILER_KEY && {
-            terrain: {
-              type: 'raster-dem',
-              tiles: [`https://api.maptiler.com/tiles/terrain-rgb-v2/{z}/{x}/{y}.png?key=${MAPTILER_KEY}`],
-              tileSize: 256,
-              encoding: 'mapbox',
-              attribution: '© MapTiler',
-              maxzoom: 14,
-            },
-          }),
-        },
-        layers: [
-          {
-            id: 'satellite',
-            type: 'raster',
-            source: 'satellite',
-            layout: { visibility: layers.satellite ? 'visible' : 'none' },
-          },
-          {
-            id: 'sentinel2',
-            type: 'raster',
-            source: 'sentinel2',
-            layout: { visibility: layers.sentinel2 ? 'visible' : 'none' },
-          },
-        ],
-        ...(MAPTILER_KEY && {
-          terrain: { source: 'terrain', exaggeration: 1.4 },
-          sky: {
-            'sky-color': '#87ceeb',
-            'horizon-color': '#dde8f0',
-            'fog-color': '#ffffff',
-            'fog-ground-blend': 0.5,
-          },
-        }),
-      },
-      center: initialCenter,
-      zoom: 16,
+      // CARTO Dark Matter — free vector basemap, no API key required.
+      style: CARTO_DARK_STYLE,
+      // Temporary center — overridden by fitMapToPlots() in map.on('load').
+      center: GHANA_FALLBACK_CENTER,
+      zoom: 5,
       pitch: 60,
       bearing: -20,
       maxPitch: 85,
-      // Inject Bearer token on every MVT tile fetch (ADR-AUTH-001 — tiles are
-      // behind requireAuth; token is read at call time so silent refresh works).
+      // Cap zoom to 18: above this, CARTO tiles and AWS terrain DEM have no more
+      // data, causing a grey "map data not yet available" placeholder sheet.
+      maxZoom: 18,
       transformRequest: (url, resourceType) => {
         if (resourceType === 'Tile' && url.includes('/plots/tiles/')) {
           const token = getAccessToken();
@@ -414,9 +410,77 @@ export const Plot3DMap = forwardRef<Plot3DMapHandle, Props>(function Plot3DMap(
     popupRef.current = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
 
     map.on('load', () => {
-      // Vector tile source — geometry is served by PostGIS ST_AsMVT (ADR-MAP-007/008).
-      // The `plots` prop is still passed by parents and used for flyToPlot, draw
-      // mode, alert zones, and MiniMap — but polygon rendering comes from tiles.
+      // Find the first CARTO symbol layer — we insert our spatial layers below it so
+      // basemap labels remain on top of everything except our own plot labels.
+      const baseLayers = map.getStyle().layers ?? [];
+      const firstSymbolId = baseLayers.find((l) => l.type === 'symbol')?.id;
+
+      // Hide CARTO's own building-footprint extrusion layers. Without this,
+      // CARTO's grey building volumes visually bury our coloured plot extrusions.
+      for (const layerId of ['building', 'building-top', 'building-outline']) {
+        if (map.getLayer(layerId)) map.setLayoutProperty(layerId, 'visibility', 'none');
+      }
+
+      // ── Terrain (always-on, no API key required) ──────────────────────────
+      map.addSource('terrain', {
+        type: 'raster-dem',
+        tiles: [TERRARIUM_TILE_URL],
+        tileSize: 256,
+        encoding: 'terrarium',
+        maxzoom: 14,
+        attribution: '© Terrain tiles by Mapzen/Amazon, CC0',
+      });
+      map.setTerrain({ source: 'terrain', exaggeration: terrainExaggerationRef.current });
+
+      // ── Cinematic sky / atmosphere ────────────────────────────────────────
+      // MapLibre setSky only — there is no setFog() in MapLibre (Mapbox-only).
+      // Cast to any: SkySpecification typings vary across MapLibre minor versions.
+      map.setSky({
+        'sky-type': 'gradient',
+        'sky-color': '#07071a',
+        'horizon-color': '#12122a',
+        'fog-color': '#0a0a18',
+        'fog-ground-blend': 0.5,
+        'sky-opacity': ['interpolate', ['linear'], ['zoom'], 0, 0, 8, 0.5, 14, 1],
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
+
+      // ── Cinematic key light (low-angle, warm, long shadows) ───────────────
+      map.setLight({
+        anchor: 'map',
+        color: '#d4c8a0',
+        intensity: 0.45,
+        position: [1.5, 215, 65],
+      });
+
+      // ── Satellite / Sentinel-2 raster sources (default hidden) ────────────
+      map.addSource('satellite', {
+        type: 'raster',
+        tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
+        tileSize: 256,
+        attribution: 'Esri, Maxar, Earthstar Geographics',
+      });
+      map.addSource('sentinel2', {
+        type: 'raster',
+        tiles: [SENTINEL2_TILE_URL],
+        tileSize: 256,
+        attribution: 'Sentinel-2 cloudless — EOX IT Services GmbH',
+      });
+
+      const layersState = layers;
+
+      map.addLayer(
+        { id: 'satellite', type: 'raster', source: 'satellite',
+          layout: { visibility: layersState.satellite ? 'visible' : 'none' } },
+        firstSymbolId,
+      );
+      map.addLayer(
+        { id: 'sentinel2', type: 'raster', source: 'sentinel2',
+          layout: { visibility: layersState.sentinel2 ? 'visible' : 'none' } },
+        firstSymbolId,
+      );
+
+      // ── Plots vector tile source ──────────────────────────────────────────
       map.addSource('plots', {
         type: 'vector',
         tiles: [tileUrlRef.current],
@@ -425,175 +489,197 @@ export const Plot3DMap = forwardRef<Plot3DMapHandle, Props>(function Plot3DMap(
         promoteId: 'id',
       });
 
-      map.addLayer({
-        id: 'plots-fill',
-        type: 'fill',
-        source: 'plots',
-        'source-layer': 'plots',
-        paint: {
-          'fill-color': plotFillColorExpr(layers.vacantHighlight),
-          'fill-opacity': plotFillOpacityExpr(highlightPlotId, statusFilter),
+      // ── Fill-extrusion (3D, default visible) ─────────────────────────────
+      // Extrusion height driven by status; disputed plots tower at 28m.
+      map.addLayer(
+        {
+          id: 'plots-extrusion',
+          type: 'fill-extrusion',
+          source: 'plots',
+          'source-layer': 'plots',
+          layout: { visibility: 'visible' },
+          paint: {
+            'fill-extrusion-color': statusColorExpr(EXTRUSION_COLORS, '#374151'),
+            'fill-extrusion-height': [
+              'match', ['get', 'status'],
+              'VACANT',       3,
+              'OCCUPIED',     8,
+              'RESERVED',     5,
+              'UNDER_SURVEY', 6,
+              'DISPUTED',     28,
+              3,
+            ] as unknown as maplibregl.ExpressionSpecification,
+            'fill-extrusion-base': 0,
+            'fill-extrusion-opacity': extrusionOpacityExpr(highlightPlotId, statusFilter),
+            'fill-extrusion-vertical-gradient': true,
+          },
         },
-      });
+        firstSymbolId,
+      );
 
-      map.addLayer({
-        id: 'plots-outline',
-        type: 'line',
-        source: 'plots',
-        'source-layer': 'plots',
-        layout: { visibility: layers.boundaries ? 'visible' : 'none' },
-        paint: {
-          'line-color': highlightPlotId
-            ? (['case', ['==', ['get', 'id'], highlightPlotId], '#ffffff', '#475569'] as unknown as maplibregl.ExpressionSpecification)
-            : '#ffffff',
-          'line-width': highlightPlotId
-            ? (['case', ['==', ['get', 'id'], highlightPlotId], 3, 1] as unknown as maplibregl.ExpressionSpecification)
-            : 1.5,
+      // ── 2D fill (shown only when 3D is off) ───────────────────────────────
+      map.addLayer(
+        {
+          id: 'plots-fill',
+          type: 'fill',
+          source: 'plots',
+          'source-layer': 'plots',
+          layout: { visibility: 'none' },
+          paint: {
+            'fill-color': plotFillColorExpr(layersState.vacantHighlight),
+            'fill-opacity': plotFillOpacityExpr(highlightPlotId, statusFilter),
+          },
         },
-      });
+        firstSymbolId,
+      );
 
+      // ── Glowing plot boundary (glow halo + crisp core) ───────────────────
+      map.addLayer(
+        {
+          id: 'plots-outline-glow',
+          type: 'line',
+          source: 'plots',
+          'source-layer': 'plots',
+          layout: { visibility: layersState.boundaries ? 'visible' : 'none' },
+          paint: {
+            'line-color': statusColorExpr(GLOW_COLORS, '#64748b'),
+            'line-width': ['match', ['get', 'status'], 'DISPUTED', 10, 5] as unknown as maplibregl.ExpressionSpecification,
+            'line-blur':  ['match', ['get', 'status'], 'DISPUTED', 7, 4] as unknown as maplibregl.ExpressionSpecification,
+            'line-opacity': ['match', ['get', 'status'], 'DISPUTED', 0.75, 0.55] as unknown as maplibregl.ExpressionSpecification,
+          },
+        },
+        firstSymbolId,
+      );
+      map.addLayer(
+        {
+          id: 'plots-outline',
+          type: 'line',
+          source: 'plots',
+          'source-layer': 'plots',
+          layout: { visibility: layersState.boundaries ? 'visible' : 'none' },
+          paint: {
+            'line-color': highlightPlotId
+              ? (['case', ['==', ['get', 'id'], highlightPlotId], '#ffffff', statusColorExpr(GLOW_COLORS, '#94a3b8')] as unknown as maplibregl.ExpressionSpecification)
+              : statusColorExpr(GLOW_COLORS, '#94a3b8'),
+            'line-width': highlightPlotId
+              ? (['case', ['==', ['get', 'id'], highlightPlotId], 2.5, 1.2] as unknown as maplibregl.ExpressionSpecification)
+              : 1.2,
+          },
+        },
+        firstSymbolId,
+      );
+
+      // ── Plot labels ───────────────────────────────────────────────────────
       map.addLayer({
         id: 'plots-labels',
         type: 'symbol',
         source: 'plots',
         'source-layer': 'plots',
         layout: {
-          // MVT exposes plotNumber as plot_code (controller line 65)
           'text-field': ['coalesce', ['get', 'plot_code'], ''],
-          'text-font': ['Noto Sans Regular'],
+          'text-font': ['Noto Sans Regular', 'Arial Unicode MS Regular'],
           'text-size': 11,
-          visibility: layers.labels ? 'visible' : 'none',
+          visibility: layersState.labels ? 'visible' : 'none',
         },
-        paint: { 'text-color': '#1e293b', 'text-halo-color': '#ffffff', 'text-halo-width': 1.2 },
+        paint: { 'text-color': '#f1f5f9', 'text-halo-color': '#0f172a', 'text-halo-width': 1.2 },
       });
 
-      // Outer property survey boundary (full perimeter)
+      // ── Property boundary (beacon glow + crisp line) ──────────────────────
       map.addSource('property-boundary', {
         type: 'geojson',
-        data: propertyBoundaryFeatureCollection(propertyBoundary),
+        data: propertyBoundaryFC(propertyBoundary),
       });
+      map.addLayer(
+        {
+          id: 'property-boundary-glow',
+          type: 'line',
+          source: 'property-boundary',
+          paint: {
+            'line-color': '#00e5ff',
+            'line-width': 10,
+            'line-blur': 7,
+            'line-opacity': 0.55,
+          },
+        },
+        firstSymbolId,
+      );
       map.addLayer({
         id: 'property-boundary-line',
         type: 'line',
         source: 'property-boundary',
         paint: {
-          'line-color': '#ffffff',
-          'line-width': 4,
+          'line-color': '#e0f7fa',
+          'line-width': 2,
           'line-dasharray': [3, 2],
         },
       });
 
-      // Drawing overlay (in-progress new plot)
+      // ── Drawing overlay ───────────────────────────────────────────────────
       map.addSource('draw', { type: 'geojson', data: emptyFC() });
-      map.addLayer({
-        id: 'draw-fill',
-        type: 'fill',
-        source: 'draw',
-        filter: ['==', ['get', 'fill'], true],
-        paint: { 'fill-color': '#2563eb', 'fill-opacity': 0.2 },
-      });
-      map.addLayer({
-        id: 'draw-line',
-        type: 'line',
-        source: 'draw',
-        filter: ['==', ['geometry-type'], 'LineString'],
-        paint: { 'line-color': '#2563eb', 'line-width': 2, 'line-dasharray': [2, 1.5] },
-      });
-      map.addLayer({
-        id: 'draw-points',
-        type: 'circle',
-        source: 'draw',
-        filter: ['==', ['geometry-type'], 'Point'],
-        paint: { 'circle-radius': 4, 'circle-color': '#ffffff', 'circle-stroke-color': '#2563eb', 'circle-stroke-width': 2 },
-      });
+      map.addLayer({ id: 'draw-fill', type: 'fill', source: 'draw', filter: ['==', ['get', 'fill'], true],
+        paint: { 'fill-color': '#2563eb', 'fill-opacity': 0.2 } });
+      map.addLayer({ id: 'draw-line', type: 'line', source: 'draw', filter: ['==', ['geometry-type'], 'LineString'],
+        paint: { 'line-color': '#2563eb', 'line-width': 2, 'line-dasharray': [2, 1.5] } });
+      map.addLayer({ id: 'draw-points', type: 'circle', source: 'draw', filter: ['==', ['geometry-type'], 'Point'],
+        paint: { 'circle-radius': 4, 'circle-color': '#ffffff', 'circle-stroke-color': '#2563eb', 'circle-stroke-width': 2 } });
 
-      // Measurement overlay
+      // ── Measurement overlay ───────────────────────────────────────────────
       map.addSource('measure', { type: 'geojson', data: emptyFC() });
-      map.addLayer({
-        id: 'measure-fill',
-        type: 'fill',
-        source: 'measure',
-        filter: ['==', ['get', 'fill'], true],
-        paint: { 'fill-color': '#f97316', 'fill-opacity': 0.15 },
-      });
-      map.addLayer({
-        id: 'measure-line',
-        type: 'line',
-        source: 'measure',
-        filter: ['==', ['geometry-type'], 'LineString'],
-        paint: { 'line-color': '#f97316', 'line-width': 2 },
-      });
-      map.addLayer({
-        id: 'measure-points',
-        type: 'circle',
-        source: 'measure',
+      map.addLayer({ id: 'measure-fill', type: 'fill', source: 'measure', filter: ['==', ['get', 'fill'], true],
+        paint: { 'fill-color': '#f97316', 'fill-opacity': 0.15 } });
+      map.addLayer({ id: 'measure-line', type: 'line', source: 'measure', filter: ['==', ['geometry-type'], 'LineString'],
+        paint: { 'line-color': '#f97316', 'line-width': 2 } });
+      map.addLayer({ id: 'measure-points', type: 'circle', source: 'measure',
         filter: ['all', ['==', ['geometry-type'], 'Point'], ['!', ['has', 'label']]],
-        paint: { 'circle-radius': 3, 'circle-color': '#f97316' },
-      });
+        paint: { 'circle-radius': 3, 'circle-color': '#f97316' } });
       map.addLayer({
-        id: 'measure-labels',
-        type: 'symbol',
-        source: 'measure',
-        filter: ['has', 'label'],
-        layout: {
-          'text-field': ['get', 'label'],
-          'text-font': ['Noto Sans Regular'],
-          'text-size': 12,
-          'text-offset': [0, -1],
-        },
-        paint: { 'text-color': '#9a3412', 'text-halo-color': '#ffffff', 'text-halo-width': 1.5 },
+        id: 'measure-labels', type: 'symbol', source: 'measure', filter: ['has', 'label'],
+        layout: { 'text-field': ['get', 'label'], 'text-font': ['Noto Sans Regular', 'Arial Unicode MS Regular'],
+          'text-size': 12, 'text-offset': [0, -1] },
+        paint: { 'text-color': '#fed7aa', 'text-halo-color': '#0f172a', 'text-halo-width': 1.5 },
       });
 
-      // Alert zones (pulsing red circles for plots with active GeofenceAlerts)
+      // ── Alert zones ───────────────────────────────────────────────────────
       map.addSource('alert-zones', {
         type: 'geojson',
-        data: alertZonesFeatureCollection(plotsRef.current, alertPlotIds ?? []),
+        data: alertZonesFC(plotsRef.current, alertPlotIds ?? []),
       });
       map.addLayer({
-        id: 'alert-zones-circle',
-        type: 'circle',
-        source: 'alert-zones',
-        layout: { visibility: layers.alertZones ? 'visible' : 'none' },
-        paint: {
-          'circle-radius': 12,
-          'circle-color': '#ef4444',
-          'circle-opacity': 0.4,
-          'circle-stroke-color': '#ef4444',
-          'circle-stroke-width': 2,
-        },
+        id: 'alert-zones-circle', type: 'circle', source: 'alert-zones',
+        layout: { visibility: layersState.alertZones ? 'visible' : 'none' },
+        paint: { 'circle-radius': 12, 'circle-color': '#ef4444', 'circle-opacity': 0.4,
+          'circle-stroke-color': '#ef4444', 'circle-stroke-width': 2 },
       });
 
-      // Search result highlight
+      // ── Search highlight ──────────────────────────────────────────────────
       map.addSource('search-highlight', { type: 'geojson', data: emptyFC() });
       map.addLayer({
-        id: 'search-highlight-circle',
-        type: 'circle',
-        source: 'search-highlight',
-        paint: {
-          'circle-radius': 14,
-          'circle-color': '#facc15',
-          'circle-opacity': 0.5,
-          'circle-stroke-color': '#eab308',
-          'circle-stroke-width': 2,
-        },
+        id: 'search-highlight-circle', type: 'circle', source: 'search-highlight',
+        paint: { 'circle-radius': 14, 'circle-color': '#facc15', 'circle-opacity': 0.5,
+          'circle-stroke-color': '#eab308', 'circle-stroke-width': 2 },
       });
+
+      // ── Event handlers ────────────────────────────────────────────────────
 
       map.on('mouseenter', 'plots-fill', (e) => {
         if (modeRef.current !== 'view') return;
         map.getCanvas().style.cursor = 'pointer';
         const feature = e.features?.[0];
         if (!feature || !popupRef.current) return;
-        // MVT property names: plot_code (was plotNumber), area_sqm (was areaSqm)
-        const { plot_code, status, area_sqm } = feature.properties as {
-          plot_code: string;
-          status: string;
-          area_sqm: number;
-        };
-        popupRef.current
-          .setLngLat(e.lngLat)
-          .setHTML(
-            `<strong>${plot_code}</strong><br/>Status: ${status}<br/>Area: ${Math.round(area_sqm).toLocaleString()} m²`
-          )
+        const { plot_code, status, area_sqm } = feature.properties as { plot_code: string; status: string; area_sqm: number };
+        popupRef.current.setLngLat(e.lngLat)
+          .setHTML(`<strong>${plot_code}</strong><br/>Status: ${status}<br/>Area: ${Math.round(area_sqm).toLocaleString()} m²`)
+          .addTo(map);
+      });
+
+      map.on('mouseenter', 'plots-extrusion', (e) => {
+        if (modeRef.current !== 'view') return;
+        map.getCanvas().style.cursor = 'pointer';
+        const feature = e.features?.[0];
+        if (!feature || !popupRef.current) return;
+        const { plot_code, status, area_sqm } = feature.properties as { plot_code: string; status: string; area_sqm: number };
+        popupRef.current.setLngLat(e.lngLat)
+          .setHTML(`<strong>${plot_code}</strong><br/>Status: ${status}<br/>Area: ${Math.round(area_sqm).toLocaleString()} m²`)
           .addTo(map);
       });
 
@@ -601,8 +687,16 @@ export const Plot3DMap = forwardRef<Plot3DMapHandle, Props>(function Plot3DMap(
         if (modeRef.current !== 'view') return;
         if (popupRef.current && e.lngLat) popupRef.current.setLngLat(e.lngLat);
       });
+      map.on('mousemove', 'plots-extrusion', (e) => {
+        if (modeRef.current !== 'view') return;
+        if (popupRef.current && e.lngLat) popupRef.current.setLngLat(e.lngLat);
+      });
 
       map.on('mouseleave', 'plots-fill', () => {
+        map.getCanvas().style.cursor = modeRef.current === 'view' ? '' : 'crosshair';
+        popupRef.current?.remove();
+      });
+      map.on('mouseleave', 'plots-extrusion', () => {
         map.getCanvas().style.cursor = modeRef.current === 'view' ? '' : 'crosshair';
         popupRef.current?.remove();
       });
@@ -612,7 +706,10 @@ export const Plot3DMap = forwardRef<Plot3DMapHandle, Props>(function Plot3DMap(
         const lngLat: [number, number] = [e.lngLat.lng, e.lngLat.lat];
 
         if (m === 'view') {
-          const features = map.queryRenderedFeatures(e.point, { layers: ['plots-fill'] });
+          // Query both layers — extrusion layer is hit in 3D mode
+          const extFeatures = map.queryRenderedFeatures(e.point, { layers: ['plots-extrusion'] });
+          const fillFeatures = map.queryRenderedFeatures(e.point, { layers: ['plots-fill'] });
+          const features = extFeatures.length ? extFeatures : fillFeatures;
           if (features.length > 0) {
             const id = features[0].properties?.id as string;
             const plot = plotsRef.current.find((p) => p.id === id) ?? null;
@@ -629,8 +726,7 @@ export const Plot3DMap = forwardRef<Plot3DMapHandle, Props>(function Plot3DMap(
           updateDrawSource(map, drawPointsRef.current);
           if (drawPointsRef.current.length >= 3) {
             const ring = [...drawPointsRef.current, drawPointsRef.current[0]];
-            const sqm = turfArea(turfPolygon([ring]));
-            setLiveLabel(`${Math.round(sqm).toLocaleString()} m²`);
+            setLiveLabel(`${Math.round(turfArea(turfPolygon([ring]))).toLocaleString()} m²`);
           } else {
             setLiveLabel(null);
           }
@@ -642,11 +738,10 @@ export const Plot3DMap = forwardRef<Plot3DMapHandle, Props>(function Plot3DMap(
           if (measureDistPointsRef.current.length >= 2) {
             const [a, b] = measureDistPointsRef.current;
             const meters = turfDistance(a, b, { units: 'kilometers' }) * 1000;
-            const label = formatDistance(meters);
             measureFeaturesRef.current = [
               ...measureFeaturesRef.current,
               { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [a, b] } },
-              { type: 'Feature', properties: { label }, geometry: { type: 'Point', coordinates: midpoint(a, b) } },
+              { type: 'Feature', properties: { label: formatDistance(meters) }, geometry: { type: 'Point', coordinates: midpoint(a, b) } },
             ];
             measureDistPointsRef.current = [];
             setLiveLabel(null);
@@ -694,6 +789,11 @@ export const Plot3DMap = forwardRef<Plot3DMapHandle, Props>(function Plot3DMap(
         }
       });
 
+      // Fit to actual plot data immediately (no animation on initial load).
+      // plotsRef.current is populated before mount because Plot3DMap only renders
+      // after PropertyMapPage's isLoading gate clears.
+      fitMapToPlots(map, plotsRef.current, false);
+
       setMapInstance(map);
     });
 
@@ -709,35 +809,65 @@ export const Plot3DMap = forwardRef<Plot3DMapHandle, Props>(function Plot3DMap(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Update status/highlight/filter-driven styling without re-creating the map.
-  // Plot geometry is now served by the MVT vector source — no setData needed.
+  // ─── 2D / 3D toggle ──────────────────────────────────────────────────────
+
+  const handleToggle3D = () => {
+    const map = mapRef.current;
+    const next = !is3DRef.current;
+    setIs3D(next);
+    if (!map || !map.isStyleLoaded()) return;
+
+    map.easeTo({ pitch: next ? 60 : 0, duration: 800 });
+
+    if (next) {
+      map.setTerrain({ source: 'terrain', exaggeration: terrainExaggerationRef.current });
+      if (map.getLayer('plots-extrusion')) map.setLayoutProperty('plots-extrusion', 'visibility', 'visible');
+      if (map.getLayer('plots-fill'))      map.setLayoutProperty('plots-fill',      'visibility', 'none');
+    } else {
+      map.setTerrain(null);
+      if (map.getLayer('plots-extrusion')) map.setLayoutProperty('plots-extrusion', 'visibility', 'none');
+      if (map.getLayer('plots-fill'))      map.setLayoutProperty('plots-fill',      'visibility', 'visible');
+    }
+  };
+
+  // Terrain exaggeration slider
+  const handleExaggerationChange = (v: number) => {
+    setTerrainExaggeration(v);
+    const map = mapRef.current;
+    if (!map || !map.isStyleLoaded() || !is3DRef.current) return;
+    map.setTerrain({ source: 'terrain', exaggeration: v });
+  };
+
+  // Satellite (sentinel2) quick toggle from toolbar
+  const handleToggleSatellite = () => {
+    setLayers((prev) => ({ ...prev, sentinel2: !prev.sentinel2 }));
+  };
+
+  // ─── Styling reactive effects ────────────────────────────────────────────
+
+  // Status / highlight / filter driven styling
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
-
     const apply = () => {
+      if (map.getLayer('plots-extrusion')) {
+        map.setPaintProperty('plots-extrusion', 'fill-extrusion-opacity', extrusionOpacityExpr(highlightPlotId, statusFilter));
+      }
       if (map.getLayer('plots-fill')) {
         map.setPaintProperty('plots-fill', 'fill-color', plotFillColorExpr(layers.vacantHighlight));
         map.setPaintProperty('plots-fill', 'fill-opacity', plotFillOpacityExpr(highlightPlotId, statusFilter));
       }
       if (map.getLayer('plots-outline')) {
-        map.setPaintProperty(
-          'plots-outline',
-          'line-color',
+        map.setPaintProperty('plots-outline', 'line-color',
           highlightPlotId
-            ? (['case', ['==', ['get', 'id'], highlightPlotId], '#ffffff', '#475569'] as unknown as maplibregl.ExpressionSpecification)
-            : '#ffffff'
-        );
-        map.setPaintProperty(
-          'plots-outline',
-          'line-width',
+            ? (['case', ['==', ['get', 'id'], highlightPlotId], '#ffffff', statusColorExpr(GLOW_COLORS, '#94a3b8')] as unknown as maplibregl.ExpressionSpecification)
+            : statusColorExpr(GLOW_COLORS, '#94a3b8'));
+        map.setPaintProperty('plots-outline', 'line-width',
           highlightPlotId
-            ? (['case', ['==', ['get', 'id'], highlightPlotId], 3, 1] as unknown as maplibregl.ExpressionSpecification)
-            : 1.5
-        );
+            ? (['case', ['==', ['get', 'id'], highlightPlotId], 2.5, 1.2] as unknown as maplibregl.ExpressionSpecification)
+            : 1.2);
       }
     };
-
     if (map.isStyleLoaded()) apply();
     else map.once('load', apply);
   }, [highlightPlotId, statusFilter, layers.vacantHighlight]);
@@ -746,48 +876,31 @@ export const Plot3DMap = forwardRef<Plot3DMapHandle, Props>(function Plot3DMap(
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
-
     const apply = () => {
-      if (map.getLayer('satellite')) map.setLayoutProperty('satellite', 'visibility', layers.satellite ? 'visible' : 'none');
-      if (map.getLayer('sentinel2')) map.setLayoutProperty('sentinel2', 'visibility', layers.sentinel2 ? 'visible' : 'none');
-      if (map.getLayer('plots-outline')) map.setLayoutProperty('plots-outline', 'visibility', layers.boundaries ? 'visible' : 'none');
-      if (map.getLayer('plots-labels')) map.setLayoutProperty('plots-labels', 'visibility', layers.labels ? 'visible' : 'none');
-      if (map.getLayer('alert-zones-circle')) map.setLayoutProperty('alert-zones-circle', 'visibility', layers.alertZones ? 'visible' : 'none');
+      if (map.getLayer('satellite'))           map.setLayoutProperty('satellite',           'visibility', layers.satellite  ? 'visible' : 'none');
+      if (map.getLayer('sentinel2'))           map.setLayoutProperty('sentinel2',           'visibility', layers.sentinel2  ? 'visible' : 'none');
+      if (map.getLayer('plots-outline-glow'))  map.setLayoutProperty('plots-outline-glow',  'visibility', layers.boundaries ? 'visible' : 'none');
+      if (map.getLayer('plots-outline'))       map.setLayoutProperty('plots-outline',       'visibility', layers.boundaries ? 'visible' : 'none');
+      if (map.getLayer('plots-labels'))        map.setLayoutProperty('plots-labels',        'visibility', layers.labels     ? 'visible' : 'none');
+      if (map.getLayer('alert-zones-circle'))  map.setLayoutProperty('alert-zones-circle',  'visibility', layers.alertZones ? 'visible' : 'none');
     };
-
     if (map.isStyleLoaded()) apply();
     else map.once('load', apply);
   }, [layers.satellite, layers.sentinel2, layers.boundaries, layers.labels, layers.alertZones]);
 
-  // Recenter the map when switching to a different property (skip the initial mount,
-  // which already centers via the initialCenter calculation above).
+  // Refit bounds when property changes (for pages that keep Plot3DMap mounted across property switches).
   const didMountRef = useRef(false);
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
-    if (!didMountRef.current) {
-      didMountRef.current = true;
-      return;
+    if (!didMountRef.current) { didMountRef.current = true; return; }
+
+    (map.getSource('plots') as maplibregl.VectorTileSource | undefined)?.setTiles([tileUrlRef.current]);
+    if (map.isStyleLoaded()) {
+      fitMapToPlots(map, plotsRef.current);
+    } else {
+      map.once('load', () => fitMapToPlots(map, plotsRef.current));
     }
-
-    let target: [number, number] | null = center ?? null;
-    if (!target && propertyBoundary) {
-      try {
-        target = turfCentroid({ type: 'Feature', properties: {}, geometry: propertyBoundary }).geometry
-          .coordinates as [number, number];
-      } catch {
-        target = null;
-      }
-    }
-    if (!target) target = GHANA_FALLBACK_CENTER;
-
-    map.flyTo({ center: target, zoom: 16, pitch: 60, bearing: -20, essential: true });
-
-    // Swap the vector tile source so cached tiles for the old property are
-    // dropped and re-fetched for the new one. tileUrlRef is already updated
-    // by the tileUrl sync effect (runs before this effect in the same render).
-    const src = map.getSource('plots') as maplibregl.VectorTileSource | undefined;
-    src?.setTiles([tileUrlRef.current]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [propertyId]);
 
@@ -795,12 +908,9 @@ export const Plot3DMap = forwardRef<Plot3DMapHandle, Props>(function Plot3DMap(
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
-
     const apply = () => {
-      const source = map.getSource('property-boundary') as maplibregl.GeoJSONSource | undefined;
-      source?.setData(propertyBoundaryFeatureCollection(propertyBoundary));
+      (map.getSource('property-boundary') as maplibregl.GeoJSONSource | undefined)?.setData(propertyBoundaryFC(propertyBoundary));
     };
-
     if (map.isStyleLoaded()) apply();
     else map.once('load', apply);
   }, [propertyBoundary]);
@@ -809,59 +919,55 @@ export const Plot3DMap = forwardRef<Plot3DMapHandle, Props>(function Plot3DMap(
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
-
     const apply = () => {
-      const source = map.getSource('alert-zones') as maplibregl.GeoJSONSource | undefined;
-      source?.setData(alertZonesFeatureCollection(plots, alertPlotIds ?? []));
+      (map.getSource('alert-zones') as maplibregl.GeoJSONSource | undefined)?.setData(alertZonesFC(plots, alertPlotIds ?? []));
     };
-
     if (map.isStyleLoaded()) apply();
     else map.once('load', apply);
   }, [plots, alertPlotIds]);
 
-  // Cursor style for active draw/measure modes
+  // Cursor style
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
     map.getCanvas().style.cursor = mode === 'view' ? '' : 'crosshair';
   }, [mode]);
 
-  // Token rotation: when the silent-refresh interceptor issues a new access
-  // token, flush the MVT tile cache so in-flight and subsequent tile requests
-  // use the updated Bearer header (transformRequest reads getAccessToken() per
-  // tile, but cached responses won't be re-requested until setTiles is called).
+  // Token rotation: flush MVT tile cache when access token rotates
   useEffect(() => {
     const unsubscribe = onAccessTokenChange(() => {
       const map = mapRef.current;
       if (!map || !map.isStyleLoaded()) return;
-      const src = map.getSource('plots') as maplibregl.VectorTileSource | undefined;
-      src?.setTiles([tileUrlRef.current]);
+      (map.getSource('plots') as maplibregl.VectorTileSource | undefined)?.setTiles([tileUrlRef.current]);
     });
     return unsubscribe;
   }, []);
 
-  // Pulsing animation for alert zones + search highlight
+  // Pulsing animation for alert zones + search highlight.
+  // Uses setInterval capped at ~12.5fps (80ms) instead of rAF to keep
+  // setPaintProperty calls well below the 60fps/~480 calls-per-sec rate
+  // the previous rAF loop was generating (F. performance fix).
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapInstance) return;
 
-    let raf: number;
-    const animate = () => {
+    const tick = () => {
       const t1 = Date.now() / 500;
       if (map.getLayer('alert-zones-circle')) {
-        map.setPaintProperty('alert-zones-circle', 'circle-radius', 10 + Math.sin(t1) * 5);
+        map.setPaintProperty('alert-zones-circle', 'circle-radius',  10 + Math.sin(t1) * 5);
         map.setPaintProperty('alert-zones-circle', 'circle-opacity', 0.25 + ((Math.sin(t1) + 1) / 2) * 0.35);
       }
       const t2 = Date.now() / 350;
       if (map.getLayer('search-highlight-circle')) {
-        map.setPaintProperty('search-highlight-circle', 'circle-radius', 12 + Math.sin(t2) * 8);
+        map.setPaintProperty('search-highlight-circle', 'circle-radius',  12 + Math.sin(t2) * 8);
         map.setPaintProperty('search-highlight-circle', 'circle-opacity', 0.3 + ((Math.sin(t2) + 1) / 2) * 0.4);
       }
-      raf = requestAnimationFrame(animate);
     };
-    raf = requestAnimationFrame(animate);
-    return () => cancelAnimationFrame(raf);
+    const id = setInterval(tick, 80);
+    return () => clearInterval(id);
   }, [mapInstance]);
+
+  // ─── Mode / interaction handlers ─────────────────────────────────────────
 
   const handleModeChange = (newMode: MapMode) => {
     drawPointsRef.current = [];
@@ -869,10 +975,7 @@ export const Plot3DMap = forwardRef<Plot3DMapHandle, Props>(function Plot3DMap(
     measureAreaPointsRef.current = [];
     setLiveLabel(null);
     const map = mapRef.current;
-    if (map) {
-      updateDrawSource(map, []);
-      refreshMeasureSource(map);
-    }
+    if (map) { updateDrawSource(map, []); refreshMeasureSource(map); }
     setSelectedPlot(null);
     setLayersOpen(false);
     setMode(newMode);
@@ -904,11 +1007,7 @@ export const Plot3DMap = forwardRef<Plot3DMapHandle, Props>(function Plot3DMap(
         description: data.description,
       });
       if (data.status !== 'VACANT') {
-        try {
-          await propertiesApi.updatePlotStatus(propertyId, plot.id, data.status);
-        } catch {
-          // Best-effort — ignore if the current role can't update plot status directly
-        }
+        try { await propertiesApi.updatePlotStatus(propertyId, plot.id, data.status); } catch { /* best-effort */ }
       }
       return plot;
     },
@@ -928,6 +1027,8 @@ export const Plot3DMap = forwardRef<Plot3DMapHandle, Props>(function Plot3DMap(
     if (map) updateDrawSource(map, []);
   };
 
+  // ─── Render ──────────────────────────────────────────────────────────────
+
   return (
     <div className={cn('relative', className ?? 'h-[32rem] w-full rounded-lg')}>
       <div ref={containerRef} className="absolute inset-0 rounded-lg overflow-hidden" />
@@ -939,9 +1040,22 @@ export const Plot3DMap = forwardRef<Plot3DMapHandle, Props>(function Plot3DMap(
         onToggleLayers={handleToggleLayers}
         layersOpen={layersOpen}
         liveLabel={liveLabel}
+        is3D={is3D}
+        onToggle3D={handleToggle3D}
+        satelliteOn={layers.sentinel2}
+        onToggleSatellite={handleToggleSatellite}
       />
 
-      {layersOpen && <LayerControlsPanel layers={layers} onChange={setLayers} onClose={() => setLayersOpen(false)} />}
+      {layersOpen && (
+        <LayerControlsPanel
+          layers={layers}
+          onChange={setLayers}
+          onClose={() => setLayersOpen(false)}
+          terrainExaggeration={terrainExaggeration}
+          onTerrainExaggerationChange={handleExaggerationChange}
+          is3D={is3D}
+        />
+      )}
 
       {selectedPlot && !pendingPlot && <PlotDetailPanel plot={selectedPlot} onClose={() => setSelectedPlot(null)} />}
 
@@ -962,13 +1076,8 @@ export const Plot3DMap = forwardRef<Plot3DMapHandle, Props>(function Plot3DMap(
         <div className="absolute inset-0 z-10 flex items-center justify-center bg-slate-900/40 rounded-lg pointer-events-none">
           <div className="bg-white rounded-xl shadow-xl px-6 py-5 max-w-sm text-center pointer-events-auto">
             <p className="text-sm font-semibold text-slate-900">No survey data yet</p>
-            <p className="text-sm text-slate-500 mt-1">
-              Import GPS coordinates to activate the satellite map
-            </p>
-            <Link
-              to="/survey"
-              className="inline-block mt-3 text-sm font-medium text-brand-600 hover:text-brand-700"
-            >
+            <p className="text-sm text-slate-500 mt-1">Import GPS coordinates to activate the satellite map</p>
+            <Link to="/survey" className="inline-block mt-3 text-sm font-medium text-brand-600 hover:text-brand-700">
               Go to Survey →
             </Link>
           </div>

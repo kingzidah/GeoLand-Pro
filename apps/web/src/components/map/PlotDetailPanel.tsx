@@ -1,8 +1,9 @@
 import { Link } from 'react-router-dom';
-import { X, ArrowRight } from 'lucide-react';
+import { X, ArrowRight, Loader2 } from 'lucide-react';
+import { useQuery } from '@tanstack/react-query';
 import { PlotStatusBadge } from '@/components/ui/Badge';
 import { formatArea, formatCurrency, formatDate } from '@/utils/format';
-import { getSimulatedTenant } from '@/utils/simulatedTenant';
+import { plotsApi } from '@/api/plots';
 import type { MapPlot } from '@/types';
 
 interface Props {
@@ -11,13 +12,13 @@ interface Props {
 }
 
 export function PlotDetailPanel({ plot, onClose }: Props) {
-  const tenant = plot.status === 'OCCUPIED' ? getSimulatedTenant(plot.id) : null;
+  const { data: detail, isLoading } = useQuery({
+    queryKey: ['plot-detail', plot.id],
+    queryFn: () => plotsApi.getById(plot.id),
+    staleTime: 30_000,
+  });
 
-  let leaseEnd: Date | null = null;
-  if (tenant) {
-    leaseEnd = new Date(tenant.leaseStart);
-    leaseEnd.setFullYear(leaseEnd.getFullYear() + 2);
-  }
+  const activeLease = detail?.leaseAgreements.find((l) => l.status === 'ACTIVE') ?? null;
 
   return (
     <div className="absolute top-4 right-4 z-30 w-72 bg-white rounded-xl shadow-2xl border border-slate-200 overflow-hidden">
@@ -37,29 +38,46 @@ export function PlotDetailPanel({ plot, onClose }: Props) {
           <span className="font-medium text-slate-900">{formatArea(plot.areaSqm)}</span>
         </div>
 
-        {tenant && (
-          <>
-            <div className="pt-2 mt-1 border-t border-slate-100 space-y-2.5">
-              <div className="flex items-center justify-between">
-                <span className="text-slate-500">Tenant</span>
-                <span className="font-medium text-slate-900">{tenant.fullName}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-slate-500">Monthly Rent</span>
-                <span className="font-medium text-slate-900">{formatCurrency(tenant.monthlyRentGHS)}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-slate-500">Lease Start</span>
-                <span className="font-medium text-slate-900">{formatDate(tenant.leaseStart)}</span>
-              </div>
-              {leaseEnd && (
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-500">Lease End</span>
-                  <span className="font-medium text-slate-900">{formatDate(leaseEnd.toISOString())}</span>
-                </div>
-              )}
+        {isLoading && (
+          <div className="pt-2 mt-1 border-t border-slate-100 flex items-center gap-2 text-slate-400 text-xs">
+            <Loader2 size={12} className="animate-spin" />
+            Loading lease data…
+          </div>
+        )}
+
+        {!isLoading && activeLease && (
+          <div className="pt-2 mt-1 border-t border-slate-100 space-y-2.5">
+            <div className="flex items-center justify-between">
+              <span className="text-slate-500">Tenant</span>
+              <span className="font-medium text-slate-900">
+                {activeLease.tenant.user.firstName} {activeLease.tenant.user.lastName}
+              </span>
             </div>
-          </>
+            <div className="flex items-center justify-between">
+              <span className="text-slate-500">Monthly Rent</span>
+              <span className="font-medium text-slate-900">{formatCurrency(activeLease.monthlyRentGHS)}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-slate-500">Lease Start</span>
+              <span className="font-medium text-slate-900">{formatDate(activeLease.startDate)}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-slate-500">Lease End</span>
+              <span className="font-medium text-slate-900">{formatDate(activeLease.endDate)}</span>
+            </div>
+            {activeLease.arrearsGHS > 0 && (
+              <div className="flex items-center justify-between">
+                <span className="text-slate-500">Arrears</span>
+                <span className="font-medium text-red-600">{formatCurrency(activeLease.arrearsGHS)}</span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {!isLoading && !activeLease && detail && (
+          <div className="pt-2 mt-1 border-t border-slate-100 text-xs text-slate-400 italic">
+            No active tenant
+          </div>
         )}
 
         <Link

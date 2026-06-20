@@ -1,4 +1,4 @@
-import { Pencil, Ruler, Square, Eraser, Layers as LayersIcon } from 'lucide-react';
+import { Pencil, Ruler, Square, Eraser, Layers as LayersIcon, Box, Satellite } from 'lucide-react';
 import { cn } from '@/utils/cn';
 
 export type MapMode = 'view' | 'draw-plot' | 'measure-distance' | 'measure-area';
@@ -10,9 +10,16 @@ interface Props {
   onToggleLayers: () => void;
   layersOpen: boolean;
   liveLabel?: string | null;
+  is3D: boolean;
+  onToggle3D: () => void;
+  satelliteOn: boolean;
+  onToggleSatellite: () => void;
 }
 
-export function MapToolbar({ mode, onModeChange, onClearMeasurements, onToggleLayers, layersOpen, liveLabel }: Props) {
+export function MapToolbar({
+  mode, onModeChange, onClearMeasurements, onToggleLayers, layersOpen, liveLabel,
+  is3D, onToggle3D, satelliteOn, onToggleSatellite,
+}: Props) {
   const toggle = (m: MapMode) => onModeChange(mode === m ? 'view' : m);
 
   const buttonClass = (active: boolean) =>
@@ -26,6 +33,12 @@ export function MapToolbar({ mode, onModeChange, onClearMeasurements, onToggleLa
   return (
     <div className="absolute top-4 left-4 z-20 flex flex-col gap-2 max-w-[calc(100%-2rem)]">
       <div className="flex flex-wrap gap-2">
+        <button className={buttonClass(is3D)} onClick={onToggle3D} title="Toggle 2D / 3D view">
+          <Box size={14} /> {is3D ? '3D' : '2D'}
+        </button>
+        <button className={buttonClass(satelliteOn)} onClick={onToggleSatellite} title="Toggle Sentinel-2 satellite imagery">
+          <Satellite size={14} /> Satellite
+        </button>
         <button className={buttonClass(mode === 'draw-plot')} onClick={() => toggle('draw-plot')}>
           <Pencil size={14} /> Draw Plot
         </button>

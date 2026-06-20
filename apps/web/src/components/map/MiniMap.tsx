@@ -11,11 +11,13 @@ interface Props {
 function toFeatureCollection(plots: MapPlot[]): GeoJSON.FeatureCollection {
   return {
     type: 'FeatureCollection',
-    features: plots.map((plot) => ({
-      type: 'Feature',
-      geometry: plot.boundaryGeoJSON as GeoJSON.Geometry,
-      properties: { id: plot.id },
-    })),
+    features: plots
+      .filter((plot) => plot.boundaryGeoJSON != null)
+      .map((plot) => ({
+        type: 'Feature',
+        geometry: plot.boundaryGeoJSON as GeoJSON.Geometry,
+        properties: { id: plot.id },
+      })),
   };
 }
 
@@ -43,16 +45,36 @@ export function MiniMap({ plots, mainMap }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
 
-  // Initialise the minimap once we have plots to fit bounds to
+  // Stable key derived from sorted plot IDs — changes when property switches
+  const plotKey = [...plots].map(p => p.id).sort().join(',');
+
+  // Initialise (or re-initialise) the minimap whenever the plot set changes
   useEffect(() => {
-    if (!containerRef.current || mapRef.current || plots.length === 0) return;
+    if (!containerRef.current || plots.length === 0) return;
+
+    // Clean up any previous minimap instance before re-creating
+    if (mapRef.current) {
+      mapRef.current.remove();
+      mapRef.current = null;
+    }
 
     const fc = toFeatureCollection(plots);
-    const [minX, minY, maxX, maxY] = bbox(fc);
+    if (fc.features.length === 0) return;
+
+    let bboxCoords: [number, number, number, number];
+    try {
+      bboxCoords = bbox(fc) as [number, number, number, number];
+    } catch { return; }
+
+    const [minX, minY, maxX, maxY] = bboxCoords;
 
     const map = new maplibregl.Map({
       container: containerRef.current,
-      style: { version: 8, sources: {}, layers: [], glyphs: undefined },
+      style: {
+        version: 8,
+        sources: {},
+        layers: [{ id: 'background', type: 'background', paint: { 'background-color': '#1e293b' } }],
+      },
       center: [(minX + maxX) / 2, (minY + maxY) / 2],
       zoom: 13,
       interactive: false,
@@ -82,12 +104,13 @@ export function MiniMap({ plots, mainMap }: Props) {
         paint: { 'line-color': '#ef4444', 'line-width': 2 },
       });
 
+      // Cap maxZoom so the minimap stays context-level even for tiny plot sets.
       map.fitBounds(
         [
           [minX, minY],
           [maxX, maxY],
         ],
-        { padding: 12, animate: false }
+        { padding: 20, animate: false, maxZoom: 14 }
       );
     });
 
@@ -97,7 +120,7 @@ export function MiniMap({ plots, mainMap }: Props) {
       mapRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [plots.length > 0]);
+  }, [plotKey]);
 
   // Sync the viewport rectangle with the main map's current view
   useEffect(() => {

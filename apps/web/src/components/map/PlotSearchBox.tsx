@@ -1,6 +1,5 @@
 import { useMemo, useState } from 'react';
 import { Search } from 'lucide-react';
-import { getSimulatedTenant } from '@/utils/simulatedTenant';
 import type { MapPlot } from '@/types';
 
 interface Props {
@@ -15,14 +14,7 @@ export function PlotSearchBox({ plots, onSelect }: Props) {
     const q = query.trim().toLowerCase();
     if (!q) return [];
     return plots
-      .filter((p) => {
-        if (p.plotNumber.toLowerCase().includes(q)) return true;
-        if (p.status === 'OCCUPIED') {
-          const tenant = getSimulatedTenant(p.id);
-          if (tenant.fullName.toLowerCase().includes(q)) return true;
-        }
-        return false;
-      })
+      .filter((p) => p.plotNumber.toLowerCase().includes(q))
       .slice(0, 8);
   }, [plots, query]);
 
@@ -33,7 +25,7 @@ export function PlotSearchBox({ plots, onSelect }: Props) {
         <input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search plot ID or tenant name…"
+          placeholder="Search plot ID…"
           className="w-full pl-8 pr-3 py-1.5 rounded-lg border border-slate-300 bg-white text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500"
         />
       </div>
