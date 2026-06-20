@@ -5,49 +5,44 @@ import { asyncHandler } from '../utils/asyncHandler';
 import { AuthenticatedRequest } from '../middleware/authenticate';
 import { ApiError } from '../utils/ApiError';
 
-const MAX_ZOOM = 22;
-
 interface PlotTileRow {
   tile: Buffer;
 }
 
-/**
- * Serves Mapbox Vector Tiles (MVT) of plot boundaries for the 3D map.
- *
- * GET /api/plots/tiles/:z/:x/:y.pbf?propertyId=...
- *
- * Tenancy is enforced via an INNER JOIN to `properties` (plots have no
- * organisationId of their own — see ADR-MAP-005). Geometry is read from the
- * `boundary` PostGIS column (synced from boundaryGeoJSON by sync_plot_boundary).
- * Per ADR-MAP-006, no extrusion_height column exists — the client computes
- * extrusion height from `status`/`area_sqm` itself.
- */
 export const plotTilesController = {
   getTile: asyncHandler(async (req: Request, res: Response) => {
-    const organisationId = (req as AuthenticatedRequest).organisationId;
-    if (!organisationId) {
+    const authReq = req as AuthenticatedRequest;
+    const organisationId = authReq.organisationId ?? null;
+
+    // Org-scoped users must have an organisationId (Rule 3).
+    // Platform admins (no personal org) are allowed through; the propertyId
+    // query param narrows their access to a specific property.
+    if (!organisationId && !authReq.user.isPlatformAdmin) {
       throw ApiError.forbidden('This action requires an organisation context');
     }
 
+    // Zod (tileParamSchema via validate middleware) has already coerced z/x/y
+    // to integers and checked z in [0,22] and x,y >= 0.
+    // The only cross-check Zod cannot express is x,y < 2**z.
     const z = Number(req.params.z);
     const x = Number(req.params.x);
     const y = Number(req.params.y);
-
-    if (
-      !Number.isInteger(z) ||
-      !Number.isInteger(x) ||
-      !Number.isInteger(y) ||
-      z < 0 ||
-      z > MAX_ZOOM ||
-      x < 0 ||
-      x >= 2 ** z ||
-      y < 0 ||
-      y >= 2 ** z
-    ) {
+    if (x >= 2 ** z || y >= 2 ** z) {
       throw ApiError.badRequest('Invalid tile coordinates');
     }
 
-    const propertyId = typeof req.query.propertyId === 'string' ? req.query.propertyId : null;
+    // propertyId was validated as an optional CUID by tileQuerySchema.
+    const propertyId = (req.query.propertyId as string | undefined) ?? null;
+
+    // Build conditional SQL fragments so we never bind `null` into a positional
+    // parameter — Prisma v5 can throw PrismaClientValidationError when a null
+    // is bound with a ::text cast in some driver configurations.
+    const orgCondition = organisationId
+      ? Prisma.sql`AND pr."organisationId" = ${organisationId}`
+      : Prisma.sql``;
+    const propertyCondition = propertyId
+      ? Prisma.sql`AND p."propertyId" = ${propertyId}`
+      : Prisma.sql``;
 
     const rows = await prisma.$queryRaw<PlotTileRow[]>(
       Prisma.sql`
@@ -75,9 +70,9 @@ export const plotTilesController = {
             ) AS geom
           FROM plots p
           INNER JOIN properties pr ON pr.id = p."propertyId"
-          WHERE pr."organisationId" = ${organisationId}
-            AND p.boundary IS NOT NULL
-            AND (${propertyId}::text IS NULL OR p."propertyId" = ${propertyId})
+          WHERE p.boundary IS NOT NULL
+            ${orgCondition}
+            ${propertyCondition}
             AND p.boundary && (SELECT env_4326 FROM bounds)
         )
         SELECT ST_AsMVT(mvt_geom, 'plots', 4096, 'geom') AS tile

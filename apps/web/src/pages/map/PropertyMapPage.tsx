@@ -64,6 +64,20 @@ export function PropertyMapPage() {
 
   const alertPlotIds = (alerts?.data ?? []).filter((a) => a.isActive).map((a) => a.plotId);
 
+  // When no ?property= URL param is present, activePropertyId silently
+  // defaults to properties[0]?.id. Write it into the URL immediately so the
+  // URL is always the single source of truth — every property switch (including
+  // the implicit first-load default) goes through ?property=<id>, preventing
+  // desync between the header, tile URL, and plots array.
+  useEffect(() => {
+    if (selectedPropertyId !== null || !activePropertyId) return;
+    const next = new URLSearchParams(searchParams);
+    next.set('property', activePropertyId);
+    setSearchParams(next, { replace: true });
+    // searchParams / setSearchParams are stable refs from react-router
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activePropertyId, selectedPropertyId]);
+
   const focusPlotId = searchParams.get('plot');
   useEffect(() => {
     if (!focusPlotId || !plots?.length) return;
@@ -176,6 +190,7 @@ export function PropertyMapPage() {
                     <PlotSearchBox plots={plots ?? []} onSelect={(plot) => mapRef.current?.flyToPlot(plot.id)} />
                   </div>
                   <Plot3DMap
+                    key={property.id}
                     ref={mapRef}
                     plots={plots ?? []}
                     propertyId={property.id}

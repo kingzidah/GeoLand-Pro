@@ -78,6 +78,18 @@ export const listPlotsQuerySchema = z.object({
   status: z.enum(['VACANT', 'OCCUPIED', 'DISPUTED', 'RESERVED', 'UNDER_SURVEY']).optional(),
 });
 
+// ─── MVT tile schemas ─────────────────────────────────────────────────────────
+
+export const tileParamSchema = z.object({
+  z: z.coerce.number().int().min(0).max(22),
+  x: z.coerce.number().int().min(0),
+  y: z.coerce.number().int().min(0),
+});
+
+export const tileQuerySchema = z.object({
+  propertyId: z.string().cuid({ message: 'Invalid property ID' }).optional(),
+});
+
 // ─── Exported types ───────────────────────────────────────────────────────────
 
 export type CreatePropertyInput = z.infer<typeof createPropertySchema>;

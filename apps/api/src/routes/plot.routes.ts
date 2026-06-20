@@ -2,11 +2,11 @@ import { Router } from 'express';
 import { plotController } from '../controllers/plot.controller';
 import { plotTilesController } from '../controllers/plot.tiles.controller';
 import { authenticate } from '../middleware/authenticate';
-import { scopeToOrganisation, requireOrganisation } from '../middleware/tenant.middleware';
+import { scopeToOrganisation } from '../middleware/tenant.middleware';
 import { requireAnyCapability } from '../middleware/requireCapability';
 import { Capability } from '@geolandpro/rbac';
 import { validate } from '../middleware/validate';
-import { plotIdParamSchema } from '../validations/property.schema';
+import { plotIdParamSchema, tileParamSchema, tileQuerySchema } from '../validations/property.schema';
 
 const router = Router();
 
@@ -15,7 +15,16 @@ router.use(scopeToOrganisation);
 
 // MVT tile feed for the 3D map (Map3D / Plot3DMap). Must be registered before
 // the /:plotId route below so "tiles" isn't matched as a plotId.
-router.get('/tiles/:z/:x/:y.pbf', requireOrganisation, plotTilesController.getTile);
+// requireOrganisation is NOT used here: that middleware blocks platform admins
+// (who have no personal organisationId), but platform admins must be able to
+// view tiles for any property. Auth + org-scoping is enforced inside the
+// controller — org users are filtered by organisationId (Rule 3); platform
+// admins are filtered by propertyId only.
+router.get(
+  '/tiles/:z/:x/:y.pbf',
+  validate({ params: tileParamSchema, query: tileQuerySchema }),
+  plotTilesController.getTile
+);
 
 // Standalone plot lookup (no propertyId in the URL) — used by the plot detail
 // page reached from the map. Staff get org-scoped access (PLOT_VIEW); tenants
